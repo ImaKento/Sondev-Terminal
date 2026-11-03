@@ -36,19 +36,73 @@ if (-not (Get-Command conda -ErrorAction SilentlyContinue)) {
     ) | Where-Object { $_ -and (Test-Path (Join-Path $_ "Scripts\conda.exe")) }
 
     if ($__wimux_conda_roots) {
-        $global:__wimux_conda_exe = Join-Path @($__wimux_conda_roots)[0] "Scripts\conda.exe"
+        $global:__wimux_conda_root = @($__wimux_conda_roots)[0]
 
         function global:conda {
-            Remove-Item Function:\conda -ErrorAction SilentlyContinue
-            $hook = (& $global:__wimux_conda_exe "shell.powershell" "hook") | Out-String
-            # Import the conda module globally (we are inside a function scope here)
+            $root = $global:__wimux_conda_root
+            $exe = Join-Path $root "Scripts\conda.exe"
+            $py = Join-Path $root "python.exe"
+            $hook = (& $exe "shell.powershell" "hook" 2>$null) | Out-String
+            $viaPython = $false
+            if (-not $hook.Trim() -and (Test-Path -LiteralPath $py)) {
+                # conda.exe (the launcher) may fail on some setups
+                # ("invalid choice: ''"). Run conda through python instead.
+                $hook = (& $py -m conda "shell.powershell" "hook" 2>$null) | Out-String
+                $viaPython = [bool]$hook.Trim()
+            }
+            if (-not $hook.Trim()) {
+                Write-Host "conda: could not initialize conda ($root)" -ForegroundColor Red
+                return
+            }
+            # Import the conda module globally (we are inside a function scope here).
+            # It defines the alias `conda` -> Invoke-Conda, which takes precedence over this stub.
             $hook = $hook -replace 'Import-Module ', 'Import-Module -Global '
+            # The hook ends with "conda activate base" (auto_activate_base). Run it only
+            # after __wimux_conda_fix, otherwise it fails on PowerShell 7 ("invalid choice: ''").
+            $lines = $hook -split "`r?`n"
+            $deferred = @($lines | Where-Object { $_ -match '^\s*conda\s+activate\b' })
+            $hook = ($lines | Where-Object { $_ -notmatch '^\s*conda\s+activate\b' }) -join "`n"
             Invoke-Expression $hook
+            __wimux_conda_fix -Force:$viaPython
+            # Skip the base activation when the user is activating / deactivating anyway
+            if ($args.Count -eq 0 -or ($args[0] -ne 'activate' -and $args[0] -ne 'deactivate')) {
+                foreach ($line in $deferred) { Invoke-Expression $line }
+            }
+            Remove-Item Function:\conda -ErrorAction SilentlyContinue
             conda @args
         }
     }
     Remove-Variable __wimux_conda_roots -ErrorAction SilentlyContinue
 }
+
+# PowerShell 7: conda's module runs "& $Env:CONDA_EXE $Env:_CE_M $Env:_CE_CONDA <args>"
+# with _CE_M / _CE_CONDA empty, and newer PowerShell passes them to conda.exe as ""
+# ("invalid choice: ''", then "Invoke-Expression: ... empty string").
+# Route conda through "python -m conda" so no empty argument is passed.
+# Also applies when conda was set up by the user's profile (conda init).
+function global:__wimux_conda_via_python {
+    # activation resets these, so set them on every call
+    $Env:CONDA_EXE = $global:__wimux_conda_py
+    $Env:_CE_M = "-m"
+    $Env:_CE_CONDA = "conda"
+    Invoke-Conda @args
+}
+
+function global:__wimux_conda_fix([switch]$Force) {
+    if (-not $Force -and $PSVersionTable.PSVersion.Major -lt 7) { return }
+    if (-not (Get-Command Invoke-Conda -ErrorAction SilentlyContinue)) { return }
+    $py = $Env:CONDA_PYTHON_EXE
+    if ((-not $py -or -not (Test-Path -LiteralPath $py)) -and $Env:CONDA_EXE) {
+        # <root>\Scripts\conda.exe -> <root>\python.exe
+        $py = Join-Path (Split-Path -Parent (Split-Path -Parent $Env:CONDA_EXE)) "python.exe"
+    }
+    if (-not $py -or -not (Test-Path -LiteralPath $py)) { return }
+    $global:__wimux_conda_py = $py
+    Set-Alias -Name conda -Value __wimux_conda_via_python -Scope Global -Force
+}
+
+# conda set up by the user's profile: fix it now
+__wimux_conda_fix
 
 # ---------------------------------------------------------------------------
 # cdi: pick a folder from wimux's directory history, inside the terminal.
