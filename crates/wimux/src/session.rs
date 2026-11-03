@@ -75,6 +75,9 @@ pub struct PaneState {
     /// 終了時に Claude Code が起動していたか
     #[serde(default)]
     pub claude: bool,
+    /// そのペインの Claude Code のセッション ID（`claude --resume <ID>` で再開する）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_session: Option<String>,
     /// ブラウザのタブなら URL
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -149,6 +152,7 @@ mod tests {
                             cwd: Some("C:\\work".into()),
                             conda: Some("labelme".into()),
                             claude: true,
+                            claude_session: Some("3f2a9c1e-1234".into()),
                             url: None,
                         }],
                     }),

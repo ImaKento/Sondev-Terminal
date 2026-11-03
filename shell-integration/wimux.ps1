@@ -139,25 +139,54 @@ function global:cdi {
     $target = $null
     $fzf = __wimux_fzf
     if ($fzf) {
-        # Run fzf with its list and result in UTF-8 temp files. This keeps Japanese
-        # paths intact without touching the console encoding (which breaks
-        # native commands on PowerShell 7). fzf draws its UI on the console itself.
-        $in = [IO.Path]::GetTempFileName()
-        $out = [IO.Path]::GetTempFileName()
+        # Run fzf through .NET Process: the list goes in and the result comes out
+        # as UTF-8 bytes, so Japanese paths stay intact without touching the console
+        # encoding (which breaks native commands on PowerShell 7). Start-Process is
+        # not used because it refuses winget's symlinked fzf.exe. fzf draws its UI
+        # on the console itself.
         try {
-            [IO.File]::WriteAllLines($in, [string[]]$items, (New-Object System.Text.UTF8Encoding $false))
-            $fzfArgs = @('--height', '40%', '--reverse', '--prompt', '"cdi> "')
-            if ($query) { $fzfArgs += @('--query', ('"' + ($query -replace '"', '') + '"')) }
-            Start-Process -FilePath $fzf -ArgumentList $fzfArgs -NoNewWindow -Wait `
-                -RedirectStandardInput $in -RedirectStandardOutput $out
-            $target = Get-Content -LiteralPath $out -Encoding UTF8 -TotalCount 1
-        } finally {
-            Remove-Item -LiteralPath $in, $out -ErrorAction SilentlyContinue
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $fzf
+            $psi.Arguments = '--height 40% --reverse --prompt "cdi> "'
+            if ($query) { $psi.Arguments += ' --query "' + ($query -replace '"', '') + '"' }
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $bytes = [Text.Encoding]::UTF8.GetBytes((($items -join "`n") + "`n"))
+            $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+            $p.StandardInput.Close()
+            $reader = New-Object System.IO.StreamReader($p.StandardOutput.BaseStream, (New-Object System.Text.UTF8Encoding $false))
+            $target = $reader.ReadToEnd().Trim()
+            $p.WaitForExit()
+        } catch {
+            # fzf could not be started: fall back to the built-in picker
+            $target = __wimux_pick $items $query
         }
     } else {
         $target = __wimux_pick $items $query
     }
     if ($target) { Set-Location -LiteralPath $target }
+}
+
+# ---------------------------------------------------------------------------
+# claude: run Claude Code with a SessionStart hook that tells wimux the session
+# id of this pane, so each tab resumes its own session next time
+# (claude --resume <id> instead of claude --continue).
+# ---------------------------------------------------------------------------
+function global:claude {
+    $exe = Get-Command claude -CommandType Application, ExternalScript -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $exe) {
+        Write-Host "claude: Claude Code is not installed"
+        return
+    }
+    $settings = $env:WIMUX_CLAUDE_SETTINGS
+    if ($settings -and (Test-Path -LiteralPath $settings)) {
+        & $exe.Source --settings $settings @args
+    } else {
+        & $exe.Source @args
+    }
 }
 
 # ---------------------------------------------------------------------------

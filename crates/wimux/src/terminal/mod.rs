@@ -204,6 +204,10 @@ impl Terminal {
         if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
             cmd.env("WIMUX_BIN_DIR", dir);
         }
+        // claude 関数が使う、セッション ID を記録するフックの設定
+        if let Some(path) = crate::claude_session::write_hook_settings() {
+            cmd.env("WIMUX_CLAUDE_SETTINGS", path);
+        }
 
         let mut child = pair
             .slave

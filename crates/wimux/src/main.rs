@@ -7,6 +7,7 @@
 pub const APP_NAME: &str = "Sondev Terminal";
 
 mod browser;
+mod claude_session;
 mod dirs;
 mod notify;
 mod picker;
@@ -22,7 +23,13 @@ mod workspace;
 use gpui_kit::*;
 
 fn main() {
+    // Claude Code のフックとして呼ばれたとき（ウィンドウは開かない）
+    if std::env::args().nth(1).as_deref() == Some("--claude-hook") {
+        claude_session::run_hook();
+        return;
+    }
     env_logger::init();
+    claude_session::cleanup();
     let s = settings::load();
     browser::init(s.browser_cdp.then_some(settings::CDP_PORT));
 

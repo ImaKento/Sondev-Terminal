@@ -73,6 +73,34 @@ impl Node {
         }
     }
 
+    /// `target` を分割して `new` を置く。`before` なら前（左 or 上）、そうでなければ後ろ（右 or 下）
+    pub fn split_at(&mut self, target: PaneId, new: PaneId, axis: Axis, before: bool) -> bool {
+        if !self.split(target, new, axis) {
+            return false;
+        }
+        if before {
+            self.swap_children_of(target, new);
+        }
+        true
+    }
+
+    /// `a` と `b` を子に持つ分割の、子の順番を入れ替える
+    fn swap_children_of(&mut self, a: PaneId, b: PaneId) -> bool {
+        match self {
+            Node::Leaf(_) => false,
+            Node::Split { first, second, .. } => {
+                let pair = matches!((&**first, &**second), (Node::Leaf(x), Node::Leaf(y))
+                    if (*x == a && *y == b) || (*x == b && *y == a));
+                if pair {
+                    std::mem::swap(first, second);
+                    true
+                } else {
+                    first.swap_children_of(a, b) || second.swap_children_of(a, b)
+                }
+            }
+        }
+    }
+
     /// ペインを取り除く。ツリーが空になったら `None`
     pub fn remove(self, target: PaneId) -> Option<Node> {
         match self {
@@ -251,6 +279,17 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_before() {
+        let mut root = Node::Leaf(1);
+        assert!(root.split_at(1, 2, Axis::Horizontal, true));
+        assert_eq!(root.leaves(), vec![2, 1]);
+        assert!(root.split_at(1, 3, Axis::Vertical, false));
+        assert_eq!(root.leaves(), vec![2, 1, 3]);
+        assert!(root.split_at(1, 4, Axis::Vertical, true));
+        assert_eq!(root.leaves(), vec![2, 4, 1, 3]);
+    }
 
     #[test]
     fn split_and_neighbors() {

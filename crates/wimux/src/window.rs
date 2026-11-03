@@ -83,6 +83,12 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("tab", NoAction, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("shift-tab", NoAction, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("ctrl-c", NoAction, Some(TERMINAL_CONTEXT)),
+        // 入力欄（URL 欄など）でも Ctrl+C などは入力欄自身で処理する
+        KeyBinding::new("ctrl-c", NoAction, Some("TextField")),
+        KeyBinding::new("ctrl-x", NoAction, Some("TextField")),
+        KeyBinding::new("ctrl-a", NoAction, Some("TextField")),
+        KeyBinding::new("ctrl-v", NoAction, Some("TextField")),
+        KeyBinding::new("tab", NoAction, Some("TextField")),
     ]
 }
 
@@ -143,6 +149,74 @@ fn claude_state_from_title(title: &str) -> Option<ClaudeState> {
     }
 }
 
+/// ドラッグ中のタブ
+#[derive(Clone)]
+struct DraggedTab {
+    pane: PaneId,
+    label: String,
+}
+
+/// ドラッグ中にマウスについてくる表示
+struct TabDragPreview {
+    label: String,
+}
+
+impl Render for TabDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let c = th();
+        div()
+            .px(px(12.))
+            .py(px(5.))
+            .rounded(px(7.))
+            .bg(rgb(c.hover_bg_strong))
+            .border_1()
+            .border_color(rgb(c.accent))
+            .text_size(px(UI_TAB))
+            .text_color(rgb(c.text))
+            .child(self.label.clone())
+    }
+}
+
+/// 区画のどこに落とすか（中央 = その区画のタブに加える、端 = 分割して置く）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropZone {
+    Center,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl DropZone {
+    /// 区画内の位置（0〜1）から。端から 25% 以内なら、いちばん近い辺
+    fn at(x: f32, y: f32) -> Self {
+        let edges = [
+            (x, DropZone::Left),
+            (1. - x, DropZone::Right),
+            (y, DropZone::Top),
+            (1. - y, DropZone::Bottom),
+        ];
+        let (d, zone) = edges
+            .into_iter()
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap_or((1., DropZone::Center));
+        if d < 0.25 { zone } else { DropZone::Center }
+    }
+}
+
+/// タブの移動先
+#[derive(Debug, Clone, Copy)]
+enum TabDest {
+    /// 区画のタブの並びの index 番目（usize::MAX なら最後）
+    Tab { gid: GroupId, index: usize },
+    /// 区画の中央（タブとして加える）か端（分割して置く）
+    Zone { gid: GroupId, zone: DropZone },
+    /// サイドバーのワークスペース（フォーカスしている区画のタブとして加える）
+    Workspace(usize),
+    /// サイドバーの空いているところ（新しいワークスペースにする）
+    NewWorkspace,
+}
+
 struct Pane {
     view: Option<Entity<TerminalView>>,
     /// 起動時の作業フォルダ（遅延起動のため保持）
@@ -153,6 +227,8 @@ struct Pane {
     conda: Option<String>,
     title: Option<String>,
     claude: ClaudeState,
+    /// 前回のセッションから引き継いだ Claude Code のセッション ID（このペインでまだ再開していない場合に使う）
+    claude_session: Option<String>,
     /// git のブランチ名（cwd から .git/HEAD を読む）
     branch: Option<String>,
     /// 見ていない間に通知があった（ペインに青い枠を付ける）
@@ -195,6 +271,7 @@ impl Pane {
             conda: None,
             title: None,
             claude: ClaudeState::None,
+            claude_session: None,
             branch: None,
             attention: false,
             prompted: false,
@@ -226,6 +303,8 @@ pub struct WimuxWindow {
     picker: Option<(Entity<Picker>, PickerTarget, Subscription)>,
     save_task: Option<Task<()>>,
     closing: bool,
+    /// タブをドラッグ中、どの区画のどこに落とすか（区画の上に予告を出す）
+    drop_hint: Option<(GroupId, DropZone)>,
     focus_handle: FocusHandle,
     /// ターミナルの文字サイズ（Ctrl+= / Ctrl+- / Ctrl+0）
     font_size: f32,
@@ -262,6 +341,7 @@ impl WimuxWindow {
             picker: None,
             save_task: None,
             closing: false,
+            drop_hint: None,
             font_size: settings.font_size,
             sidebar_visible: true,
             ws_menu: None,
@@ -412,7 +492,7 @@ impl WimuxWindow {
             .filter(|p| p.is_dir());
         let terminal = match Terminal::spawn(SpawnOptions {
             cwd,
-            pane_id: format!("pane-{id}"),
+            pane_id: crate::claude_session::pane_key(id),
         }) {
             Ok(t) => t,
             Err(e) => {
@@ -721,6 +801,179 @@ impl WimuxWindow {
         self.schedule_save(cx);
     }
 
+    /// ワークスペースの番号（その区画を含むもの）
+    fn ws_of_group(&self, gid: GroupId) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|ws| ws.groups().contains(&gid))
+    }
+
+    /// タブをドラッグで移動する（並べ替え・別の区画へ・分割して置く・別のワークスペースへ）
+    fn move_tab(&mut self, pane: PaneId, dest: TabDest, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_hint = None;
+        let Some((src_wi, src_gid, src_idx)) = self.locate(pane) else {
+            return;
+        };
+        let src_len = self.groups.get(&src_gid).map_or(0, |g| g.tabs.len());
+        match dest {
+            // 自分の区画の中央、または 1 枚しかないタブで自分の区画を分割 → 何もしない（選ぶだけ）
+            TabDest::Zone { gid, zone } if gid == src_gid && (zone == DropZone::Center || src_len == 1) => {
+                self.select_tab(src_gid, src_idx, window, cx);
+                return;
+            }
+            TabDest::Workspace(wi) if wi == src_wi => return,
+            // 同じ区画の中での並べ替え: 落とした先のタブの位置に入る
+            TabDest::Tab { gid, index } if gid == src_gid => {
+                if let Some(g) = self.groups.get_mut(&gid) {
+                    g.tabs.remove(src_idx);
+                    let i = index.min(g.tabs.len());
+                    g.tabs.insert(i, pane);
+                    g.active = i;
+                }
+                self.select_tab(gid, index.min(src_len - 1), window, cx);
+                return;
+            }
+            _ => {}
+        }
+
+        // 元の区画から外す（空になった区画はツリーからも外す）
+        let mut src_ws_empty = false;
+        if self.groups.get_mut(&src_gid).is_some_and(|g| g.remove(pane)) {
+            self.groups.remove(&src_gid);
+            let ws = &mut self.workspaces[src_wi];
+            let root = std::mem::replace(&mut ws.root, Node::Leaf(0));
+            match root.remove(src_gid) {
+                Some(root) => {
+                    if ws.focused == src_gid {
+                        ws.focused = root.leaves()[0];
+                    }
+                    ws.root = root;
+                }
+                None => src_ws_empty = true,
+            }
+        }
+
+        // 移動先に入れる
+        let placed = match dest {
+            TabDest::Tab { gid, index } => self.groups.get_mut(&gid).map(|g| {
+                let i = index.min(g.tabs.len());
+                g.tabs.insert(i, pane);
+                g.active = i;
+                gid
+            }),
+            TabDest::Zone {
+                gid,
+                zone: DropZone::Center,
+            } => self.groups.get_mut(&gid).map(|g| {
+                g.tabs.push(pane);
+                g.active = g.tabs.len() - 1;
+                gid
+            }),
+            TabDest::Zone { gid, zone } => {
+                let (axis, before) = match zone {
+                    DropZone::Left => (Axis::Horizontal, true),
+                    DropZone::Right => (Axis::Horizontal, false),
+                    DropZone::Top => (Axis::Vertical, true),
+                    _ => (Axis::Vertical, false),
+                };
+                let new = self.alloc_id();
+                self.groups.insert(new, Group::new(pane));
+                match self.ws_of_group(gid) {
+                    Some(wi) if self.workspaces[wi].root.split_at(gid, new, axis, before) => {
+                        Some(new)
+                    }
+                    _ => {
+                        self.groups.remove(&new);
+                        None
+                    }
+                }
+            }
+            TabDest::NewWorkspace => None,
+            TabDest::Workspace(wi) => {
+                let gid = self.workspaces.get(wi).map(|ws| ws.focused);
+                gid.and_then(|gid| {
+                    let g = self.groups.get_mut(&gid)?;
+                    g.tabs.push(pane);
+                    g.active = g.tabs.len() - 1;
+                    Some(gid)
+                })
+            }
+        };
+        // 新しいワークスペースへ（入れられなかったときも、失わないようにここへ）
+        let dest_gid = placed.unwrap_or_else(|| {
+            let gid = self.alloc_id();
+            self.groups.insert(gid, Group::new(pane));
+            self.workspaces.push(Workspace::new(gid));
+            gid
+        });
+
+        if src_ws_empty {
+            self.workspaces.remove(src_wi);
+        }
+        if let Some(wi) = self.ws_of_group(dest_gid) {
+            self.active = wi;
+            self.workspaces[wi].focused = dest_gid;
+        }
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// タブをドラッグしている間、区画に重ねる「ここに落とすとこうなる」表示と受け口
+    fn render_drop_overlay(&self, gid: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
+        let hint = self
+            .drop_hint
+            .filter(|(g, _)| *g == gid)
+            .map(|(_, z)| z);
+        let accent = th().accent;
+        div()
+            .id(("drop-zone", gid))
+            .absolute()
+            .inset_0()
+            .on_drag_move::<DraggedTab>(cx.listener(
+                move |this, ev: &DragMoveEvent<DraggedTab>, _, cx| {
+                    let b = ev.bounds;
+                    let p = ev.event.position;
+                    let new = if b.contains(&p) {
+                        let x = f32::from(p.x - b.origin.x) / f32::from(b.size.width).max(1.);
+                        let y = f32::from(p.y - b.origin.y) / f32::from(b.size.height).max(1.);
+                        Some((gid, DropZone::at(x, y)))
+                    } else if this.drop_hint.is_some_and(|(g, _)| g == gid) {
+                        None
+                    } else {
+                        return;
+                    };
+                    if this.drop_hint != new {
+                        this.drop_hint = new;
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
+                let zone = this
+                    .drop_hint
+                    .filter(|(g, _)| *g == gid)
+                    .map_or(DropZone::Center, |(_, z)| z);
+                this.move_tab(d.pane, TabDest::Zone { gid, zone }, window, cx);
+            }))
+            .when_some(hint, |el, zone| {
+                let preview = div()
+                    .absolute()
+                    .bg(rgba((accent << 8) | 0x30))
+                    .border_2()
+                    .border_color(rgb(accent))
+                    .rounded(px(4.));
+                let preview = match zone {
+                    DropZone::Center => preview.inset(px(4.)),
+                    DropZone::Left => preview.top_0().bottom_0().left_0().w(relative(0.5)),
+                    DropZone::Right => preview.top_0().bottom_0().right_0().w(relative(0.5)),
+                    DropZone::Top => preview.left_0().right_0().top_0().h(relative(0.5)),
+                    DropZone::Bottom => preview.left_0().right_0().bottom_0().h(relative(0.5)),
+                };
+                el.child(preview)
+            })
+    }
+
     fn move_focus(&mut self, dir: Direction, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ws) = self.workspaces.get_mut(self.active) else {
             return;
@@ -949,11 +1202,17 @@ impl WimuxWindow {
 
     /// 表示する区画のブラウザを（まだなら）作り、見えないブラウザは隠す
     fn sync_browsers(&mut self, visible: &[PaneId], window: &mut Window, cx: &mut Context<Self>) {
-        let show: Vec<PaneId> = if self.overlay_open() {
+        // ポップアップを開いている間・タブをドラッグしている間はブラウザを隠す
+        // （ブラウザは別ウィンドウなので、上に予告を描けず、落とすこともできないため）
+        let show: Vec<PaneId> = if self.overlay_open() || cx.has_active_drag() {
             Vec::new()
         } else {
             visible.to_vec()
         };
+        // 表示するブラウザのタブには URL 欄を用意する（前回から復元したタブにも）
+        for id in visible {
+            self.ensure_url_field(*id, window, cx);
+        }
         for id in &show {
             let Some(pane) = self.panes.get_mut(id) else {
                 continue;
@@ -1375,6 +1634,11 @@ impl WimuxWindow {
             cwd: pane.and_then(|p| p.cwd.clone()),
             conda: pane.and_then(|p| p.conda.clone()),
             claude: pane.is_some_and(|p| p.claude != ClaudeState::None),
+            // フックが記録した今のセッション。まだ無ければ前回から引き継いだもの
+            claude_session: pane.filter(|p| p.claude != ClaudeState::None).and_then(|p| {
+                crate::claude_session::read(&crate::claude_session::pane_key(id))
+                    .or_else(|| p.claude_session.clone())
+            }),
             url: pane.and_then(|p| p.url.clone()),
         }
     }
@@ -1453,12 +1717,23 @@ impl WimuxWindow {
         }
         let id = self.alloc_pane(p.cwd.clone());
         let pane = self.panes.get_mut(&id).expect("just allocated");
-        // conda 環境（base は自動で有効になることが多いので省略）→ Claude Code の順に再開
-        if let Some(env) = p.conda.as_ref().filter(|e| e.as_str() != "base") {
-            pane.restore_cmds.push(format!("conda activate {env}"));
+        // conda 環境 → Claude Code の順に再開。
+        // conda は使うまで初期化しない（起動を速くするため）ので、base も明示的に有効にする
+        if let Some(env) = p.conda.as_ref().filter(|e| !e.is_empty()) {
+            pane.restore_cmds
+                .push(format!("conda activate '{}'", env.replace('\'', "''")));
         }
         if p.claude && self.settings.restore_claude && restore_claude_enabled() {
-            pane.restore_cmds.push("claude --continue".into());
+            // セッション ID が分かればそのセッションを、分からなければフォルダの最新を開く
+            let session = p
+                .claude_session
+                .clone()
+                .filter(|s| crate::claude_session::valid_id(s));
+            pane.restore_cmds.push(match &session {
+                Some(s) => format!("claude --resume {s}"),
+                None => "claude --continue".into(),
+            });
+            pane.claude_session = session;
         }
         // 起動前でも状態を保持しておく（開かずに終了しても失われないように）
         pane.conda = p.conda;
@@ -1631,6 +1906,13 @@ impl WimuxWindow {
                 .cursor_pointer()
                 .when(selected, |el| el.bg(rgb(th().selected_bg)))
                 .when(!selected, |el| el.hover(|s| s.bg(rgb(th().hover_bg))))
+                // タブをワークスペースに落とすと、そのワークスペースへ移動
+                .drag_over::<DraggedTab>(|s, _, _, _| {
+                    s.bg(rgb(th().hover_bg_strong))
+                })
+                .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
+                    this.move_tab(d.pane, TabDest::Workspace(i), window, cx);
+                }))
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -1782,6 +2064,10 @@ impl WimuxWindow {
             .child(
                 div()
                     .id("ws-list")
+                    // 一覧の空いているところにタブを落とすと、新しいワークスペースになる
+                    .on_drop(cx.listener(|this, d: &DraggedTab, window, cx| {
+                        this.move_tab(d.pane, TabDest::NewWorkspace, window, cx);
+                    }))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -2152,7 +2438,7 @@ impl WimuxWindow {
                             .gap(px(16.))
                             .child(row(
                                 "起動時に会話を再開する",
-                                "前回 Claude Code を開いていたペインで claude --continue を実行します",
+                                "前回 Claude Code を開いていたペインで、そのペインのセッションを再開します（claude --resume）",
                             ))
                             .child(toggle),
                     ),
@@ -2300,9 +2586,26 @@ impl WimuxWindow {
             let attention = pane.is_some_and(|p| p.attention);
             let dot = pane_dot(claude, attention);
             let id = *id;
+            let dragged = DraggedTab {
+                pane: id,
+                label: label.clone(),
+            };
+            let accent = th().accent;
 
             div()
                 .id(("tab", id))
+                // ドラッグで並べ替え・別の区画へ移動・分割して配置
+                .on_drag(dragged, |d, _, _, cx| {
+                    cx.new(|_| TabDragPreview {
+                        label: d.label.clone(),
+                    })
+                })
+                .drag_over::<DraggedTab>(move |s, _, _, _| {
+                    s.border_l_2().border_color(rgb(accent))
+                })
+                .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
+                    this.move_tab(d.pane, TabDest::Tab { gid, index: i }, window, cx);
+                }))
                 .group("tab")
                 .relative()
                 .flex()
@@ -2382,8 +2685,14 @@ impl WimuxWindow {
                 .child(label)
         };
 
+        let dragging = cx.has_active_drag();
         div()
             .id(("group-tabs", gid))
+            // タブの行の空いているところに落とすと最後に加える
+            .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
+                this.move_tab(d.pane, TabDest::Tab { gid, index: usize::MAX }, window, cx);
+            }))
+            .drag_over::<DraggedTab>(|s, _, _, _| s.bg(rgb(th().hover_bg)))
             .flex()
             .flex_none()
             .items_end()
@@ -2410,7 +2719,8 @@ impl WimuxWindow {
                     ),
             )
             // 空いているところ（上端の区画ならドラッグでウィンドウ移動、ダブルクリックで最大化）
-            .child(div().flex_1().h_full().when(edge.top, |el| {
+            // （タブのドラッグ中はウィンドウ移動の領域にしない。落とせるように）
+            .child(div().flex_1().h_full().when(edge.top && !dragging, |el| {
                 el.window_control_area(WindowControlArea::Drag)
             }))
             // 区画を左右 / 上下に分割
@@ -2629,6 +2939,7 @@ impl WimuxWindow {
                     ))
                     .child(
                         div()
+                            .relative()
                             .flex_1()
                             .min_h_0()
                             .overflow_hidden()
@@ -2636,7 +2947,10 @@ impl WimuxWindow {
                             .border_2()
                             .border_color(rgb(attention.unwrap_or(th().term_bg)))
                             .when_some(view, |el, v| el.child(v))
-                            .when_some(browser_el, |el, b| el.child(b)),
+                            .when_some(browser_el, |el, b| el.child(b))
+                            .when(cx.has_active_drag(), |el| {
+                                el.child(self.render_drop_overlay(*gid, cx))
+                            }),
                     )
                     .into_any_element()
             }

@@ -95,6 +95,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 | Ctrl+V | クリップボードに文字があれば貼り付け。画像だけ（スクショなど）のときは、Claude Code には Alt+V（画像の貼り付け）を送り、それ以外のアプリには Ctrl+V をそのまま送る |
 | Ctrl+Shift+C / Ctrl+Shift+V | コピー / 貼り付け |
 | 右クリック | 選択があればコピー、なければ貼り付け |
+| タブをドラッグ | タブの行で並べ替え・別の区画のタブの行へ移動。区画の上に落とすと、端（25%）なら分割して配置、中央ならその区画のタブに。サイドバーのワークスペースに落とすとそこへ移動、一覧の空きに落とすと新しいワークスペース |
 | Ctrl+Enter / Shift+Enter | 改行（Claude Code など） |
 | Ctrl+= / Ctrl+- / Ctrl+0 | 文字を大きく / 小さく / 元に戻す |
 | Ctrl+Shift+B | サイドバーの表示 / 非表示 |
@@ -141,6 +142,9 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
 - 文字サイズ: ターミナル 13（Ghostty / cmux の既定）、UI 13 / タブ 12.5 / 補足 11.5
 - プロンプト: 標準の `PS パス>` のときは git のブランチ名を `PS C:\repo (main)>` のように表示（.git/HEAD を直接読むので速い。`$env:WIMUX_GIT_PROMPT = "0"` で無効）
 - Claude Code の状態の丸（タブ・サイドバー）: 黄=実行中、赤=入力待ち（許可・質問で停止。ベル / 通知で検知）、緑=完了して未確認、灰=確認済みで待機、青=その他の通知。見ていない区画は同じ色の枠で囲み、未読数のバッジも同じ色
+- Claude Code の再開: シェル連携の `claude` 関数が `--settings claude-hook-settings.json` を付けて起動し、SessionStart フック（`sondev.exe --claude-hook`）がペインごとのセッション ID を `claude-sessions\<WIMUX_PANE_ID>` に書く。保存時に読んで session.json に記録し、次回は `claude --resume <ID>`（ID が無ければ `--continue`）
+- conda の再開: base も含めて `conda activate` する（conda は遅延初期化なので base も自動では有効にならない）
+- URL 欄（text_field.rs）: カーソル移動・選択・コピー/切り取り/貼り付け・マウス選択に対応。GPUI の examples/input.rs と同じく自前で描画
 - ウィンドウ: 閉じたときの位置・大きさ・最大化を `window.json` に保存し、次の起動で復元（初回や、前回の位置がどの画面にも入らないときは最大化）
 - サイドバー: ワークスペースごとに「状態の丸・名前・未読数」「ブランチ · フォルダ」「conda · Claude の状態」「最新の通知」
 - 状態の丸: 黄=Claude 作業中、青=未確認の通知あり、緑=Claude 入力待ち
