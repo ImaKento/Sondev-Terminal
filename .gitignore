@@ -1,0 +1,6 @@
+target/
+*.pdb
+pty.log
+dist/
+installer/vendor/
+Claude outputs/

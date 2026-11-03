@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>wimux - サードパーティのライセンス</title>
+<style>
+body { font-family: "Segoe UI", "Yu Gothic UI", sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; color: #222; }
+h1 { font-size: 1.4em; }
+h2 { font-size: 1.1em; margin-top: 2em; border-bottom: 1px solid #ddd; padding-bottom: .3em; }
+ul.crates { font-size: .9em; color: #555; }
+pre { white-space: pre-wrap; background: #f6f6f8; padding: 1em; border-radius: 6px; font-size: .8em; }
+</style>
+</head>
+<body>
+<h1>wimux が使用しているソフトウェアのライセンス</h1>
+<p>wimux は以下のオープンソースソフトウェアを使用しています。</p>
+{{#each licenses}}
+<h2>{{name}}</h2>
+<ul class="crates">
+{{#each used_by}}<li>{{crate.name}} {{crate.version}}</li>{{/each}}
+</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>

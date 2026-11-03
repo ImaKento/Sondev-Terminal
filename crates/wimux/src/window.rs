@@ -1,0 +1,2923 @@
+//! メインウィンドウ: サイドバー（ワークスペース一覧）・タブバー・分割ペイン・ポップアップ。
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+
+use std::rc::Rc;
+
+use crate::browser::{self, Browser, BrowserMsg, BrowserSender};
+use crate::dirs::DirHistory;
+use crate::notify;
+use crate::picker::{Picker, PickerEvent, PickerKind};
+use crate::session::{self, Axis, NodeState, PaneState, SessionFile, WorkspaceState};
+use crate::terminal::osc::ShellEvent;
+use crate::terminal::view::{TerminalEvent, TerminalView};
+use crate::terminal::{SpawnOptions, Terminal};
+use crate::text_field::{TextField, TextFieldEvent};
+use crate::workspace::{Direction, Group, GroupId, Node, PaneId, Workspace};
+
+gpui_kit::actions!(
+    wimux,
+    [
+        NewWorkspace,
+        NextWorkspace,
+        PrevWorkspace,
+        RenameWorkspace,
+        NewTab,
+        NextTab,
+        PrevTab,
+        ClosePane,
+        SplitRight,
+        SplitDown,
+        FocusLeft,
+        FocusRight,
+        FocusUp,
+        FocusDown,
+        OpenDirPicker,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
+        ToggleSidebar,
+        OpenSettings,
+        OpenBrowser,
+    ]
+);
+
+const CONTEXT: &str = "Wimux";
+/// TerminalView の key_context と同じ名前
+const TERMINAL_CONTEXT: &str = "Terminal";
+
+/// キー割り当て。Ctrl+Shift 系はシェルやアプリとぶつかりにくいので、主にこちらを使う。
+pub fn key_bindings() -> Vec<KeyBinding> {
+    let c = Some(CONTEXT);
+    vec![
+        KeyBinding::new("ctrl-shift-n", NewWorkspace, c),
+        KeyBinding::new("ctrl-shift-pagedown", NextWorkspace, c),
+        KeyBinding::new("ctrl-shift-pageup", PrevWorkspace, c),
+        KeyBinding::new("ctrl-shift-r", RenameWorkspace, c),
+        KeyBinding::new("ctrl-shift-t", NewTab, c),
+        KeyBinding::new("ctrl-tab", NextTab, c),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, c),
+        KeyBinding::new("ctrl-shift-w", ClosePane, c),
+        KeyBinding::new("ctrl-shift-d", SplitRight, c),
+        KeyBinding::new("ctrl-shift-e", SplitDown, c),
+        KeyBinding::new("alt-left", FocusLeft, c),
+        KeyBinding::new("alt-right", FocusRight, c),
+        KeyBinding::new("alt-up", FocusUp, c),
+        KeyBinding::new("alt-down", FocusDown, c),
+        KeyBinding::new("ctrl-shift-g", OpenDirPicker, c),
+        KeyBinding::new("ctrl-=", ZoomIn, c),
+        KeyBinding::new("ctrl-+", ZoomIn, c),
+        KeyBinding::new("ctrl-shift-=", ZoomIn, c),
+        KeyBinding::new("ctrl--", ZoomOut, c),
+        KeyBinding::new("ctrl-0", ZoomReset, c),
+        KeyBinding::new("ctrl-shift-b", ToggleSidebar, c),
+        KeyBinding::new("ctrl-,", OpenSettings, c),
+        KeyBinding::new("ctrl-shift-o", OpenBrowser, c),
+        // gpui-kit の Root は Tab / Shift+Tab（フォーカス移動）と Ctrl+C（コピー）を
+        // 横取りするので、ターミナル内では無効にしてシェルにそのまま届ける
+        KeyBinding::new("tab", NoAction, Some(TERMINAL_CONTEXT)),
+        KeyBinding::new("shift-tab", NoAction, Some(TERMINAL_CONTEXT)),
+        KeyBinding::new("ctrl-c", NoAction, Some(TERMINAL_CONTEXT)),
+    ]
+}
+
+use crate::settings::{self, Settings};
+use crate::terminal::view::installed_fonts;
+use crate::theme::{self, *};
+
+/// Claude Code の状態（ターミナルのタイトルから推定）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeState {
+    None,
+    /// 応答が終わって待機中
+    Idle,
+    /// 応答を生成中
+    Working,
+    /// 許可・質問への回答を待って止まっている（Claude Code のベル・通知で検知）
+    Asking,
+}
+
+/// ペインの状態の色。
+/// 実行中=黄、入力待ち（許可・質問）=赤、完了して未確認=緑、確認済みの待機=灰、その他の通知=青
+fn pane_dot(claude: ClaudeState, attention: bool) -> Option<u32> {
+    let c = th();
+    match (claude, attention) {
+        (ClaudeState::Asking, _) => Some(c.red),
+        (ClaudeState::Working, _) => Some(c.amber),
+        (ClaudeState::Idle, true) => Some(c.green),
+        (ClaudeState::Idle, false) => Some(c.text_faint),
+        (ClaudeState::None, true) => Some(c.accent),
+        (ClaudeState::None, false) => None,
+    }
+}
+
+/// 複数ペインのうち、いちばん目を引くべき状態（ワークスペースの丸に使う）
+fn dot_priority(claude: ClaudeState, attention: bool) -> u8 {
+    match (claude, attention) {
+        (ClaudeState::Asking, _) => 5,
+        (ClaudeState::Idle, true) => 4,
+        (ClaudeState::None, true) => 3,
+        (ClaudeState::Working, _) => 2,
+        (ClaudeState::Idle, false) => 1,
+        (ClaudeState::None, false) => 0,
+    }
+}
+
+/// Claude Code はタイトルを「✳ Claude Code」（待機中）や、先頭がスピナー文字（作業中）にする
+fn claude_state_from_title(title: &str) -> Option<ClaudeState> {
+    let first = title.chars().next()?;
+    let is_spinner = ('\u{2800}'..='\u{28FF}').contains(&first) || "·✢✻✽✶*".contains(first);
+    if title.contains("Claude") || first == '✳' {
+        Some(if is_spinner {
+            ClaudeState::Working
+        } else {
+            ClaudeState::Idle
+        })
+    } else {
+        None
+    }
+}
+
+struct Pane {
+    view: Option<Entity<TerminalView>>,
+    /// 起動時の作業フォルダ（遅延起動のため保持）
+    spawn_cwd: Option<String>,
+    /// 起動後、プロンプトが出たら順に流すコマンド（復元用）
+    restore_cmds: Vec<String>,
+    cwd: Option<String>,
+    conda: Option<String>,
+    title: Option<String>,
+    claude: ClaudeState,
+    /// git のブランチ名（cwd から .git/HEAD を読む）
+    branch: Option<String>,
+    /// 見ていない間に通知があった（ペインに青い枠を付ける）
+    attention: bool,
+    /// 起動後に一度でもプロンプトが出たか（復元直後のフォルダも履歴に記録するため）
+    prompted: bool,
+    last_notified: Option<Instant>,
+    _sub: Option<Subscription>,
+    /// ブラウザのタブなら開いている URL（None ならターミナル）
+    url: Option<String>,
+    /// ブラウザ本体（表示されたときに作る）
+    browser: Option<Rc<Browser>>,
+    /// ブラウザを作れなかったときの理由（何度も作り直さないため）
+    browser_error: Option<String>,
+    /// ブラウザを作成中
+    browser_pending: bool,
+    /// URL 欄
+    url_field: Option<Entity<TextField>>,
+    _field_sub: Option<Subscription>,
+    loading: bool,
+}
+
+impl Pane {
+    fn new_browser(url: String) -> Self {
+        let mut p = Self::new(None);
+        p.url = Some(url);
+        p
+    }
+
+    fn is_browser(&self) -> bool {
+        self.url.is_some()
+    }
+
+    fn new(cwd: Option<String>) -> Self {
+        Self {
+            view: None,
+            spawn_cwd: cwd.clone(),
+            restore_cmds: Vec::new(),
+            cwd,
+            conda: None,
+            title: None,
+            claude: ClaudeState::None,
+            branch: None,
+            attention: false,
+            prompted: false,
+            last_notified: None,
+            _sub: None,
+            url: None,
+            browser: None,
+            browser_error: None,
+            browser_pending: false,
+            url_field: None,
+            _field_sub: None,
+            loading: false,
+        }
+    }
+}
+
+enum PickerTarget {
+    Rename(usize),
+}
+
+pub struct WimuxWindow {
+    workspaces: Vec<Workspace>,
+    active: usize,
+    panes: HashMap<PaneId, Pane>,
+    groups: HashMap<GroupId, Group>,
+    /// ペイン・区画の ID の払い出し
+    next_id: usize,
+    history: DirHistory,
+    picker: Option<(Entity<Picker>, PickerTarget, Subscription)>,
+    save_task: Option<Task<()>>,
+    closing: bool,
+    focus_handle: FocusHandle,
+    /// ターミナルの文字サイズ（Ctrl+= / Ctrl+- / Ctrl+0）
+    font_size: f32,
+    settings: Settings,
+    /// 設定画面を開いているか
+    settings_open: bool,
+    settings_focus: FocusHandle,
+    /// ブラウザ用の共有設定（データ保存先）。最初のブラウザを開くときに作る
+    web_context: Option<Rc<std::cell::RefCell<wry::WebContext>>>,
+    browser_tx: BrowserSender,
+    sidebar_visible: bool,
+    /// 右クリックメニュー（対象のワークスペース番号, 表示位置）
+    ws_menu: Option<(usize, Point<Pixels>)>,
+    _subs: Vec<Subscription>,
+}
+
+impl WimuxWindow {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let settings = settings::load();
+        theme::apply(&settings.theme);
+        let (browser_tx, browser_rx) = flume::unbounded::<(PaneId, BrowserMsg)>();
+        let mut this = Self {
+            workspaces: Vec::new(),
+            active: 0,
+            panes: HashMap::new(),
+            groups: HashMap::new(),
+            next_id: 1,
+            history: DirHistory::load(&session::dirs_path()),
+            settings: settings.clone(),
+            settings_open: false,
+            settings_focus: cx.focus_handle(),
+            web_context: None,
+            browser_tx: browser_tx.clone(),
+            picker: None,
+            save_task: None,
+            closing: false,
+            font_size: settings.font_size,
+            sidebar_visible: true,
+            ws_menu: None,
+            focus_handle: cx.focus_handle(),
+            _subs: Vec::new(),
+        };
+
+        match session::load_session(&session::session_path()) {
+            Some(s) => this.restore(s),
+            None => {
+                let gid = this.alloc_group(None);
+                this.workspaces.push(Workspace::new(gid));
+            }
+        }
+
+        // ウィンドウを閉じる前に保存
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            // 位置・大きさ・最大化を覚えておく（次の起動で同じように開く）
+            crate::window_state::save(&crate::window_state::SavedWindow::from_bounds(
+                window.window_bounds(),
+            ));
+            let _ = weak.update(cx, |this, _| {
+                this.closing = true;
+                this.save_now();
+            });
+            true
+        });
+        // ウィンドウがアクティブになったら、表示中ワークスペースの未読を消す
+        let sub = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active()
+                && let Some(ws) = this.workspaces.get_mut(this.active)
+            {
+                ws.unread = 0;
+                cx.notify();
+            }
+        });
+        this._subs.push(sub);
+
+        // ブラウザからのお知らせ（タイトル・URL の変化）
+        cx.spawn(async move |this, cx| {
+            while let Ok(first) = browser_rx.recv_async().await {
+                let mut msgs = vec![first];
+                msgs.extend(browser_rx.try_iter());
+                let alive = this
+                    .update(cx, |this, cx| {
+                        for (id, msg) in msgs {
+                            this.on_browser_msg(id, msg, cx);
+                        }
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // ブラウザはメインウィンドウとは別のウィンドウなので、メインウィンドウを動かしたら追従させる
+        if browser::SUPPORTED {
+            cx.spawn(async move |this, cx| {
+                let mut tick: u32 = 0;
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(30))
+                        .await;
+                    tick = tick.wrapping_add(1);
+                    let alive = this
+                        .update(cx, |this, cx| {
+                            let mut changed = Vec::new();
+                            for (id, pane) in &this.panes {
+                                if let Some(b) = &pane.browser {
+                                    b.reposition();
+                                    // ページ内の移動（SPA の pushState・#）はページ読み込みの
+                                    // 通知が来ないので、今の URL をときどき確かめる（約 0.3 秒ごと）
+                                    if tick % 10 == 0
+                                        && let Some(u) = b.current_url()
+                                        && pane.url.as_deref() != Some(u.as_str())
+                                    {
+                                        changed.push((*id, u));
+                                    }
+                                }
+                            }
+                            if !changed.is_empty() {
+                                for (id, u) in changed {
+                                    this.on_browser_msg(id, BrowserMsg::Url(u), cx);
+                                }
+                                cx.notify();
+                            }
+                        })
+                        .is_ok();
+                    if !alive {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+
+        this.focus_active(window, cx);
+        this
+    }
+
+    // -----------------------------------------------------------------------
+    // ペインの生成・起動
+    // -----------------------------------------------------------------------
+
+    fn alloc_id(&mut self) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn alloc_pane(&mut self, cwd: Option<String>) -> PaneId {
+        let id = self.alloc_id();
+        self.panes.insert(id, Pane::new(cwd));
+        id
+    }
+
+    /// タブ 1 つを持つ区画を作る
+    fn alloc_group(&mut self, cwd: Option<String>) -> GroupId {
+        let pane = self.alloc_pane(cwd);
+        let id = self.alloc_id();
+        self.groups.insert(id, Group::new(pane));
+        id
+    }
+
+    /// ペインのシェルを（まだなら）起動する。表示されるまで起動しない＝起動が速い
+    fn ensure_view(
+        &mut self,
+        id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<TerminalView>> {
+        let font_size = self.font_size;
+        let font_family = self.settings.font_family.clone();
+        let pane = self.panes.get_mut(&id)?;
+        if let Some(view) = &pane.view {
+            return Some(view.clone());
+        }
+        if pane.is_browser() {
+            return None;
+        }
+        let cwd = pane
+            .spawn_cwd
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir());
+        let terminal = match Terminal::spawn(SpawnOptions {
+            cwd,
+            pane_id: format!("pane-{id}"),
+        }) {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!("ターミナルを起動できませんでした: {e:#}");
+                return None;
+            }
+        };
+        let cmds = std::mem::take(&mut pane.restore_cmds);
+        let view = cx.new(|cx| {
+            let mut v = TerminalView::new(terminal, window, cx);
+            v.set_font_size(font_size);
+            v.set_font_family(font_family.as_deref(), cx);
+            v.queue_commands(cmds);
+            v
+        });
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            move |this, _, ev: &TerminalEvent, window, cx| {
+                this.on_terminal_event(id, ev, window, cx);
+            },
+        );
+        let pane = self.panes.get_mut(&id)?;
+        pane.view = Some(view.clone());
+        pane._sub = Some(sub);
+        Some(view)
+    }
+
+    fn focus_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.panes.get_mut(&id) {
+            pane.attention = false;
+            if pane.is_browser() {
+                // ブラウザはまだ作られていなければ次の描画で作られる。キー入力は wimux 側に残す
+                self.focus_handle.focus(window, cx);
+                return;
+            }
+        }
+        if let Some(view) = self.ensure_view(id, window, cx) {
+            let handle = view.read(cx).focus_handle(cx);
+            handle.focus(window, cx);
+            // 分割・新規タブで作ったばかりのペインは、まだ一度も描画されていないため
+            // フォーカスが定着しないことがある。描画が終わった後にもう一度フォーカスする
+            cx.on_next_frame(window, move |this, window, cx| {
+                if this.focused_pane() == Some(id) && !handle.is_focused(window) {
+                    handle.focus(window, cx);
+                }
+            });
+        }
+    }
+
+    fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.is_some() {
+            return;
+        }
+        if let Some(id) = self.focused_pane() {
+            self.focus_pane(id, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn focused_group(&self) -> Option<GroupId> {
+        Some(self.workspaces.get(self.active)?.focused)
+    }
+
+    fn focused_pane(&self) -> Option<PaneId> {
+        self.groups.get(&self.focused_group()?)?.active_pane()
+    }
+
+    fn focused_cwd(&self) -> Option<String> {
+        let id = self.focused_pane()?;
+        self.panes.get(&id)?.cwd.clone()
+    }
+
+    /// ワークスペースの全ペイン
+    fn ws_panes(&self, ws: &Workspace) -> Vec<PaneId> {
+        ws.groups()
+            .iter()
+            .filter_map(|g| self.groups.get(g))
+            .flat_map(|g| g.tabs.iter().copied())
+            .collect()
+    }
+
+    /// ワークスペースでフォーカスしているペイン
+    fn ws_focused_pane(&self, ws: &Workspace) -> Option<PaneId> {
+        self.groups.get(&ws.focused)?.active_pane()
+    }
+
+    /// ペインがどのワークスペース・区画・タブ番号にあるか
+    fn locate(&self, id: PaneId) -> Option<(usize, GroupId, usize)> {
+        self.workspaces.iter().enumerate().find_map(|(wi, ws)| {
+            ws.groups().into_iter().find_map(|gid| {
+                let ti = self.groups.get(&gid)?.tabs.iter().position(|p| *p == id)?;
+                Some((wi, gid, ti))
+            })
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // 操作
+    // -----------------------------------------------------------------------
+
+    fn select_workspace(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.workspaces.len() {
+            return;
+        }
+        self.active = index;
+        self.workspaces[index].unread = 0;
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+    }
+
+    fn new_workspace(&mut self, _: &NewWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        let gid = self.alloc_group(None);
+        self.workspaces.push(Workspace::new(gid));
+        self.select_workspace(self.workspaces.len() - 1, window, cx);
+    }
+
+    fn next_workspace(&mut self, _: &NextWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.workspaces.len();
+        if n > 0 {
+            self.select_workspace((self.active + 1) % n, window, cx);
+        }
+    }
+
+    fn prev_workspace(&mut self, _: &PrevWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.workspaces.len();
+        if n > 0 {
+            self.select_workspace((self.active + n - 1) % n, window, cx);
+        }
+    }
+
+    fn rename_workspace(
+        &mut self,
+        _: &RenameWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let index = self.active;
+        self.open_rename(index, window, cx);
+    }
+
+    fn open_rename(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.workspace_name(index);
+        self.open_picker(
+            PickerKind::Text {
+                title: "ワークスペース名（空にするとフォルダ名を自動表示）".into(),
+            },
+            current,
+            PickerTarget::Rename(index),
+            window,
+            cx,
+        );
+    }
+
+    fn close_workspace(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.workspaces.len() {
+            return;
+        }
+        let ws = self.workspaces.remove(index);
+        for gid in ws.groups() {
+            if let Some(group) = self.groups.remove(&gid) {
+                for id in group.tabs {
+                    self.panes.remove(&id);
+                }
+            }
+        }
+        if self.workspaces.is_empty() {
+            self.closing = true;
+            self.save_now();
+            crate::window_state::save(&crate::window_state::SavedWindow::from_bounds(
+                window.window_bounds(),
+            ));
+            cx.quit();
+            return;
+        }
+        if self.active > index || self.active >= self.workspaces.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+    }
+
+    /// フォーカスしている区画に新しいタブを開く
+    fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(gid) = self.focused_group() {
+            self.new_tab_in(gid, window, cx);
+        }
+    }
+
+    fn new_tab_in(&mut self, gid: GroupId, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self
+            .groups
+            .get(&gid)
+            .and_then(|g| g.active_pane())
+            .and_then(|p| self.panes.get(&p))
+            .and_then(|p| p.cwd.clone());
+        let id = self.alloc_pane(cwd);
+        if let Some(group) = self.groups.get_mut(&gid) {
+            let at = (group.active + 1).min(group.tabs.len());
+            group.tabs.insert(at, id);
+            group.active = at;
+        }
+        if let Some(ws) = self.workspaces.get_mut(self.active) {
+            ws.focused = gid;
+        }
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+    }
+
+    fn select_tab(
+        &mut self,
+        gid: GroupId,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(group) = self.groups.get_mut(&gid)
+            && index < group.tabs.len()
+        {
+            group.active = index;
+        }
+        if let Some(ws) = self.workspaces.get_mut(self.active) {
+            ws.focused = gid;
+        }
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+    }
+
+    fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(gid) = self.focused_group() else {
+            return;
+        };
+        let Some(group) = self.groups.get(&gid) else {
+            return;
+        };
+        let n = group.tabs.len() as isize;
+        if n > 0 {
+            let next = (group.active as isize + delta).rem_euclid(n) as usize;
+            self.select_tab(gid, next, window, cx);
+        }
+    }
+
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(1, window, cx);
+    }
+
+    fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(-1, window, cx);
+    }
+
+    /// フォーカスしている区画を分割し、新しい区画（タブ 1 つ）を右 or 下に作る
+    fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.focused_group() else {
+            return;
+        };
+        let cwd = self.focused_cwd();
+        let gid = self.alloc_group(cwd);
+        if let Some(ws) = self.workspaces.get_mut(self.active)
+            && ws.root.split(target, gid, axis)
+        {
+            ws.focused = gid;
+        }
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+    }
+
+    fn split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.split(Axis::Horizontal, window, cx);
+    }
+
+    fn split_down(&mut self, _: &SplitDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.split(Axis::Vertical, window, cx);
+    }
+
+    fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.focused_pane() {
+            self.close_pane_id(id, window, cx);
+        }
+    }
+
+    /// タブ（ターミナル）を閉じる。区画・ワークスペースが空になったらそれも閉じる
+    fn close_pane_id(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((wi, gid, _)) = self.locate(id) else {
+            return;
+        };
+        self.panes.remove(&id);
+        let empty = self.groups.get_mut(&gid).is_some_and(|g| g.remove(id));
+        if empty {
+            self.groups.remove(&gid);
+            let ws = &mut self.workspaces[wi];
+            let root = std::mem::replace(&mut ws.root, Node::Leaf(0));
+            match root.remove(gid) {
+                Some(root) => {
+                    if ws.focused == gid {
+                        ws.focused = root.leaves()[0];
+                    }
+                    ws.root = root;
+                }
+                None => {
+                    self.close_workspace(wi, window, cx);
+                    return;
+                }
+            }
+        }
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+    }
+
+    fn move_focus(&mut self, dir: Direction, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ws) = self.workspaces.get_mut(self.active) else {
+            return;
+        };
+        if let Some(next) = ws.root.neighbor(ws.focused, dir) {
+            ws.focused = next;
+            self.focus_active(window, cx);
+        }
+    }
+
+    fn focus_left(&mut self, _: &FocusLeft, w: &mut Window, cx: &mut Context<Self>) {
+        self.move_focus(Direction::Left, w, cx);
+    }
+    fn focus_right(&mut self, _: &FocusRight, w: &mut Window, cx: &mut Context<Self>) {
+        self.move_focus(Direction::Right, w, cx);
+    }
+    fn focus_up(&mut self, _: &FocusUp, w: &mut Window, cx: &mut Context<Self>) {
+        self.move_focus(Direction::Up, w, cx);
+    }
+    fn focus_down(&mut self, _: &FocusDown, w: &mut Window, cx: &mut Context<Self>) {
+        self.move_focus(Direction::Down, w, cx);
+    }
+
+    /// Ctrl+Shift+G: ターミナルで `cdi` を実行する（フォルダ履歴をターミナル内で選ぶ）
+    fn open_dir_picker(&mut self, _: &OpenDirPicker, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self
+            .focused_pane()
+            .and_then(|id| self.panes.get(&id))
+            .and_then(|p| p.view.clone())
+        {
+            view.update(cx, |v, _| v.send_text("cdi\r"));
+        }
+    }
+
+    fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        self.font_size = size.clamp(8., 32.);
+        let size = self.font_size;
+        for pane in self.panes.values() {
+            if let Some(view) = &pane.view {
+                view.update(cx, |v, cx| {
+                    v.set_font_size(size);
+                    cx.notify();
+                });
+            }
+        }
+        if self.settings.font_size != size {
+            self.settings.font_size = size;
+            settings::save(&self.settings);
+        }
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------------
+    // ブラウザ
+    // -----------------------------------------------------------------------
+
+    /// Ctrl+Shift+O: フォーカス中の区画に空のブラウザのタブを開き、URL 欄にカーソルを置く
+    fn open_browser(&mut self, _: &OpenBrowser, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(gid) = self.focused_group() {
+            self.open_browser_in(gid, String::new(), window, cx);
+        }
+    }
+
+    /// 区画に新しいブラウザのタブを作る。URL が空なら URL 欄にカーソルを置く
+    fn open_browser_in(
+        &mut self,
+        gid: GroupId,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.alloc_id();
+        let blank = url.is_empty();
+        self.panes.insert(id, Pane::new_browser(url));
+        if let Some(group) = self.groups.get_mut(&gid) {
+            let at = (group.active + 1).min(group.tabs.len());
+            group.tabs.insert(at, id);
+            group.active = at;
+        }
+        if let Some(ws) = self.workspaces.get_mut(self.active) {
+            ws.focused = gid;
+        }
+        self.focus_handle.focus(window, cx);
+        if blank {
+            self.focus_url_field(id, window, cx);
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// シェルの `web [URL]`: そのターミナルと同じ区画に新しいブラウザのタブを開く
+    fn open_web_from(
+        &mut self,
+        id: PaneId,
+        arg: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((wi, gid, _)) = self.locate(id) else {
+            return;
+        };
+        if wi != self.active {
+            return;
+        }
+        let url = if arg.is_empty() {
+            String::new()
+        } else {
+            browser::normalize_url(&arg)
+        };
+        self.open_browser_in(gid, url, window, cx);
+    }
+
+    /// URL 欄（入力欄）を（まだなら）作る
+    fn ensure_url_field(
+        &mut self,
+        id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<TextField>> {
+        let pane = self.panes.get(&id)?;
+        if !pane.is_browser() {
+            return None;
+        }
+        if let Some(f) = &pane.url_field {
+            return Some(f.clone());
+        }
+        let url = pane.url.clone().unwrap_or_default();
+        let field = cx.new(|cx| {
+            let mut f = TextField::new(
+                "URL・ポート番号（3000 → localhost:3000）・検索語を入力して Enter",
+                cx,
+            );
+            f.set_text(&url);
+            f
+        });
+        let sub = cx.subscribe_in(
+            &field,
+            window,
+            move |this, field, ev: &TextFieldEvent, window, cx| {
+                match ev {
+                    TextFieldEvent::Submit(text) if !text.is_empty() => {
+                        let url = browser::normalize_url(text);
+                        field.update(cx, |f, _| f.set_text(&url));
+                        this.navigate(id, &url, cx);
+                        this.focus_handle.focus(window, cx);
+                    }
+                    TextFieldEvent::Submit(_) => {}
+                    TextFieldEvent::Cancel => {
+                        let url = this
+                            .panes
+                            .get(&id)
+                            .and_then(|p| p.url.clone())
+                            .unwrap_or_default();
+                        field.update(cx, |f, _| f.set_text(&url));
+                        this.focus_handle.focus(window, cx);
+                    }
+                }
+                cx.notify();
+            },
+        );
+        let pane = self.panes.get_mut(&id)?;
+        pane.url_field = Some(field.clone());
+        pane._field_sub = Some(sub);
+        Some(field)
+    }
+
+    fn focus_url_field(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(field) = self.ensure_url_field(id, window, cx) {
+            field.update(cx, |f, cx| f.focus(window, cx));
+            // まだ描画されていない入力欄はフォーカスが定着しないので、描画後にもう一度
+            cx.on_next_frame(window, move |_, window, cx| {
+                field.update(cx, |f, cx| {
+                    if !f.focus_handle(cx).is_focused(window) {
+                        f.focus(window, cx);
+                    }
+                });
+            });
+        }
+    }
+
+    fn navigate(&mut self, id: PaneId, url: &str, cx: &mut Context<Self>) {
+        if let Some(pane) = self.panes.get_mut(&id) {
+            pane.url = Some(url.to_string());
+            pane.title = None;
+            if let Some(b) = &pane.browser {
+                b.load(url);
+            }
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    fn on_browser_msg(&mut self, id: PaneId, msg: BrowserMsg, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get_mut(&id) else {
+            return;
+        };
+        match msg {
+            BrowserMsg::Title(t) => pane.title = Some(t),
+            BrowserMsg::Loading(l) => pane.loading = l,
+            BrowserMsg::Url(u) => {
+                if u.is_empty() || u == "about:blank" {
+                    return;
+                }
+                // URL 欄は、ユーザーが打ち込み中でなければ常に今のページの URL にそろえる
+                if let Some(field) = &pane.url_field {
+                    let new = u.clone();
+                    field.update(cx, |f, cx| {
+                        if !f.is_edited() && f.text() != new {
+                            f.set_text(&new);
+                            cx.notify();
+                        }
+                    });
+                }
+                if pane.url.as_deref() != Some(u.as_str()) {
+                    pane.url = Some(u);
+                    self.schedule_save(cx);
+                }
+            }
+        }
+    }
+
+    /// ポップアップを開いている間はブラウザを隠す（子ウィンドウなので上に描けないため）
+    fn overlay_open(&self) -> bool {
+        self.picker.is_some() || self.settings_open || self.ws_menu.is_some()
+    }
+
+    /// 表示する区画のブラウザを（まだなら）作り、見えないブラウザは隠す
+    fn sync_browsers(&mut self, visible: &[PaneId], window: &mut Window, cx: &mut Context<Self>) {
+        let show: Vec<PaneId> = if self.overlay_open() {
+            Vec::new()
+        } else {
+            visible.to_vec()
+        };
+        for id in &show {
+            let Some(pane) = self.panes.get_mut(id) else {
+                continue;
+            };
+            if pane.browser.is_some()
+                || pane.browser_error.is_some()
+                || pane.browser_pending
+                || !pane.is_browser()
+            {
+                continue;
+            }
+            if pane.url.as_deref().is_none_or(str::is_empty) {
+                // URL が未入力のタブはまだブラウザを作らない
+                continue;
+            }
+            if !browser::SUPPORTED {
+                pane.browser_error =
+                    Some("この OS ではブラウザペインは使えません（Windows 専用）".into());
+                continue;
+            }
+            pane.browser_pending = true;
+            let url = pane.url.clone().unwrap_or_default();
+            let id = *id;
+            let parent = match wry::raw_window_handle::HasWindowHandle::window_handle(&*window) {
+                Ok(h) => browser::ParentWindow(h.as_raw()),
+                Err(e) => {
+                    pane.browser_error = Some(e.to_string());
+                    continue;
+                }
+            };
+            let context = self
+                .web_context
+                .get_or_insert_with(|| {
+                    Rc::new(std::cell::RefCell::new(wry::WebContext::new(Some(
+                        browser::data_dir(),
+                    ))))
+                })
+                .clone();
+            let tx = self.browser_tx.clone();
+            // WebView2 の作成中は Windows のメッセージが処理される。GPUI の処理の途中で作ると
+            // 二重に呼び出されて壊れるため、GPUI の処理の外（非同期タスク）で作る
+            cx.spawn(async move |this, cx| {
+                let result = {
+                    let mut ctx = context.borrow_mut();
+                    Browser::new(parent, &mut ctx, id, &url, tx)
+                };
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(pane) = this.panes.get_mut(&id) {
+                        pane.browser_pending = false;
+                        match result {
+                            Ok(b) => pane.browser = Some(Rc::new(b)),
+                            Err(e) => {
+                                log::error!("ブラウザを開けませんでした: {e}");
+                                pane.browser_error = Some(e.to_string());
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        for (id, pane) in &self.panes {
+            if let Some(b) = &pane.browser
+                && !show.contains(id)
+            {
+                b.set_visible(false);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 設定
+    // -----------------------------------------------------------------------
+
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = true;
+        self.ws_menu = None;
+        self.settings_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.focus_active(window, cx);
+    }
+
+    fn set_theme(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        theme::apply(name);
+        self.settings.theme = name.to_string();
+        settings::save(&self.settings);
+        // ターミナルも含めて描き直す
+        for pane in self.panes.values() {
+            if let Some(view) = &pane.view {
+                view.update(cx, |_, cx| cx.notify());
+            }
+        }
+        window.refresh();
+        cx.notify();
+    }
+
+    fn set_font_family(&mut self, family: Option<String>, cx: &mut Context<Self>) {
+        self.settings.font_family = family.clone();
+        settings::save(&self.settings);
+        for pane in self.panes.values() {
+            if let Some(view) = &pane.view {
+                view.update(cx, |v, cx| {
+                    v.set_font_family(family.as_deref(), cx);
+                    cx.notify();
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_font_size(self.font_size + 1., cx);
+    }
+    fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_font_size(self.font_size - 1., cx);
+    }
+    fn zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_font_size(DEFAULT_FONT_SIZE, cx);
+    }
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------------
+    // ポップアップ
+    // -----------------------------------------------------------------------
+
+    fn open_picker(
+        &mut self,
+        kind: PickerKind,
+        initial: String,
+        target: PickerTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let history = &self.history;
+        let picker = cx.new(|cx| Picker::new(kind, initial, Some(history), cx));
+        let sub = cx.subscribe_in(&picker, window, |this, _, ev: &PickerEvent, window, cx| {
+            this.on_picker_event(ev, window, cx);
+        });
+        picker.read(cx).focus_handle(cx).focus(window, cx);
+        self.picker = Some((picker, target, sub));
+        cx.notify();
+    }
+
+    fn on_picker_event(&mut self, ev: &PickerEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match ev {
+            PickerEvent::QueryChanged => {
+                if let Some((picker, _, _)) = &self.picker {
+                    let history = &self.history;
+                    picker.update(cx, |p, cx| {
+                        p.refresh(Some(history));
+                        cx.notify();
+                    });
+                }
+            }
+            PickerEvent::Dismissed => {
+                self.picker = None;
+                self.focus_active(window, cx);
+            }
+            PickerEvent::Confirmed(value) => {
+                let Some((_, target, _)) = self.picker.take() else {
+                    return;
+                };
+                match target {
+                    PickerTarget::Rename(index) => {
+                        if let Some(ws) = self.workspaces.get_mut(index) {
+                            ws.custom_name = (!value.is_empty()).then(|| value.clone());
+                        }
+                        self.schedule_save(cx);
+                    }
+                }
+                self.focus_active(window, cx);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ターミナルからのイベント
+    // -----------------------------------------------------------------------
+
+    fn on_terminal_event(
+        &mut self,
+        id: PaneId,
+        ev: &TerminalEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            TerminalEvent::TitleChanged(title) => {
+                let Some(pane) = self.panes.get_mut(&id) else {
+                    return;
+                };
+                pane.title = Some(title.clone());
+                let new_state = claude_state_from_title(title).unwrap_or(ClaudeState::None);
+                // 許可待ちで止まっている間は、タイトルが待機中になっても「入力待ち」のまま
+                if pane.claude == ClaudeState::Asking && new_state == ClaudeState::Idle {
+                    return;
+                }
+                let finished =
+                    pane.claude == ClaudeState::Working && new_state == ClaudeState::Idle;
+                pane.claude = new_state;
+                if finished {
+                    // 許可の確認で止まったときもタイトルは待機中になる。直後にベルが来たら
+                    // 「入力待ち」なので、少し待ってから「完了」を通知する
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(700))
+                            .await;
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            if this
+                                .panes
+                                .get(&id)
+                                .is_some_and(|p| p.claude == ClaudeState::Idle)
+                            {
+                                this.notify_pane(id, "Claude Code", "応答が終わりました", window);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            TerminalEvent::Shell(ShellEvent::Cwd(cwd)) => {
+                let Some(pane) = self.panes.get_mut(&id) else {
+                    return;
+                };
+                // プロンプトが出た = Claude Code などのアプリは終了している
+                pane.claude = ClaudeState::None;
+                // git checkout でブランチが変わることもあるので、プロンプトのたびに読み直す
+                pane.branch = git_branch(cwd);
+                if pane.cwd.as_deref() != Some(cwd.as_str()) || !pane.prompted {
+                    pane.prompted = true;
+                    pane.cwd = Some(cwd.clone());
+                    self.history.record(cwd);
+                    self.schedule_save(cx);
+                }
+            }
+            TerminalEvent::Shell(ShellEvent::UserVar { name, value }) => match name.as_str() {
+                "WIMUX_CONDA" => {
+                    if let Some(pane) = self.panes.get_mut(&id) {
+                        let conda = (!value.is_empty()).then(|| value.clone());
+                        if pane.conda != conda {
+                            pane.conda = conda;
+                            self.schedule_save(cx);
+                        }
+                    }
+                }
+                // シェル連携スクリプトのコマンド（web）から呼ばれる
+                "WIMUX_CMD" => {
+                    let mut parts = value.splitn(2, ' ');
+                    let cmd = parts.next().unwrap_or("");
+                    let arg = parts.next().unwrap_or("").trim().to_string();
+                    match cmd {
+                        // `web [url]`: 同じ区画に新しいブラウザのタブを開く
+                        "web" => self.open_web_from(id, arg, window, cx),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            },
+            TerminalEvent::Shell(ShellEvent::Notify { title, body }) => {
+                let claude_active = self
+                    .panes
+                    .get(&id)
+                    .is_some_and(|p| p.claude != ClaudeState::None);
+                // Claude Code の「許可が必要」などの通知 → 入力待ち
+                if claude_active && !body.contains("waiting for your input") {
+                    self.claude_asking(id, body, window);
+                } else {
+                    let title = title.clone().unwrap_or_else(|| "通知".into());
+                    self.notify_pane(id, &title, body, window);
+                }
+            }
+            // Claude Code は許可・質問で止まったときにベルを鳴らす（通知方法が「ベル」のとき）
+            TerminalEvent::Bell => {
+                if self
+                    .panes
+                    .get(&id)
+                    .is_some_and(|p| p.claude != ClaudeState::None)
+                {
+                    self.claude_asking(id, "許可・回答を待っています", window);
+                }
+            }
+            TerminalEvent::Exited => {
+                if !self.closing {
+                    self.close_pane_id(id, window, cx);
+                }
+            }
+            TerminalEvent::Focused => {
+                if let Some(pane) = self.panes.get_mut(&id) {
+                    pane.attention = false;
+                }
+                if let Some((wi, gid, ti)) = self.locate(id)
+                    && wi == self.active
+                {
+                    self.workspaces[wi].focused = gid;
+                    if let Some(group) = self.groups.get_mut(&gid) {
+                        group.active = ti;
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Claude Code が許可・質問への回答を待って止まった
+    fn claude_asking(&mut self, id: PaneId, body: &str, window: &Window) {
+        let Some(pane) = self.panes.get_mut(&id) else {
+            return;
+        };
+        let was_asking = pane.claude == ClaudeState::Asking;
+        pane.claude = ClaudeState::Asking;
+        if !was_asking {
+            // 直前の「完了」通知と重なっても、こちらは必ず知らせる
+            pane.last_notified = None;
+            self.notify_pane(id, "Claude Code（入力待ち）", body, window);
+        }
+    }
+
+    /// 通知: 見えていないワークスペースなら未読を増やし、ウィンドウが裏ならトーストも出す
+    fn notify_pane(&mut self, id: PaneId, title: &str, body: &str, window: &Window) {
+        // Claude Code 自身の通知とタイトル変化の検知が重なることがあるので、短時間の重複は捨てる
+        if let Some(pane) = self.panes.get_mut(&id) {
+            if pane
+                .last_notified
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(3))
+            {
+                return;
+            }
+            pane.last_notified = Some(Instant::now());
+        }
+        let Some((wi, gid, ti)) = self.locate(id) else {
+            return;
+        };
+        let window_active = window.is_window_active();
+        let shown = self.groups.get(&gid).is_some_and(|g| g.active == ti);
+        let visible = window_active && wi == self.active && shown;
+        let focused = visible && self.workspaces[wi].focused == gid;
+        if !focused && let Some(pane) = self.panes.get_mut(&id) {
+            pane.attention = true;
+        }
+        let name = self.workspace_name(wi);
+        let ws = &mut self.workspaces[wi];
+        ws.last_notification = Some(format!("{title}: {body}"));
+        if !visible {
+            ws.unread += 1;
+        }
+        if !window_active {
+            notify::toast(&format!("{title}（{name}）"), body);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 保存・復元
+    // -----------------------------------------------------------------------
+
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        if self.save_task.is_some() || self.closing {
+            return;
+        }
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(800))
+                .await;
+            let _ = this.update(cx, |this, _| {
+                this.save_task = None;
+                this.save_now();
+            });
+        }));
+    }
+
+    fn save_now(&self) {
+        if let Err(e) = session::save_session(&session::session_path(), &self.to_session()) {
+            log::warn!("セッションを保存できませんでした: {e}");
+        }
+        if let Err(e) = self.history.save(&session::dirs_path()) {
+            log::warn!("フォルダ履歴を保存できませんでした: {e}");
+        }
+        // シェルの cdi が読む一覧（よく行く順・1 行 1 フォルダ）
+        let list = self.history.query("", 500).join("\n");
+        if let Err(e) =
+            session::write_atomic(&session::config_dir().join("dirs.txt"), list.as_bytes())
+        {
+            log::warn!("フォルダ一覧を保存できませんでした: {e}");
+        }
+    }
+
+    fn to_session(&self) -> SessionFile {
+        SessionFile {
+            version: session::SESSION_VERSION,
+            active_workspace: self.active,
+            workspaces: self
+                .workspaces
+                .iter()
+                .map(|ws| WorkspaceState {
+                    name: ws.custom_name.clone(),
+                    layout: Some(self.node_to_state(&ws.root)),
+                    focused: ws
+                        .groups()
+                        .iter()
+                        .position(|g| *g == ws.focused)
+                        .unwrap_or(0),
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    fn pane_state(&self, id: PaneId) -> PaneState {
+        let pane = self.panes.get(&id);
+        PaneState {
+            cwd: pane.and_then(|p| p.cwd.clone()),
+            conda: pane.and_then(|p| p.conda.clone()),
+            claude: pane.is_some_and(|p| p.claude != ClaudeState::None),
+            url: pane.and_then(|p| p.url.clone()),
+        }
+    }
+
+    fn node_to_state(&self, node: &Node) -> NodeState {
+        match node {
+            Node::Leaf(gid) => {
+                let group = self.groups.get(gid);
+                NodeState::Group {
+                    active: group.map_or(0, |g| g.active),
+                    tabs: group
+                        .map(|g| g.tabs.iter().map(|id| self.pane_state(*id)).collect())
+                        .unwrap_or_default(),
+                }
+            }
+            Node::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => NodeState::Split {
+                axis: *axis,
+                ratio: *ratio,
+                first: Box::new(self.node_to_state(first)),
+                second: Box::new(self.node_to_state(second)),
+            },
+        }
+    }
+
+    fn restore(&mut self, s: SessionFile) {
+        for ws_state in s.workspaces {
+            let (root, focused_index) = if let Some(layout) = ws_state.layout {
+                (self.node_from_state(layout), ws_state.focused)
+            } else {
+                // v1: 表示していたタブの分割をそのまま使い、ほかのタブのペインは
+                // フォーカスしていた区画のタブとして並べる
+                let mut tabs = ws_state.tabs;
+                if tabs.is_empty() {
+                    continue;
+                }
+                let active = ws_state.active_tab.min(tabs.len() - 1);
+                let main = tabs.remove(active);
+                let root = self.node_from_state(main.layout);
+                let leaves = root.leaves();
+                let target = leaves.get(main.focused).copied().unwrap_or(leaves[0]);
+                for tab in tabs {
+                    for pane_state in flatten_panes(tab.layout) {
+                        let id = self.restore_pane(pane_state);
+                        if let Some(g) = self.groups.get_mut(&target) {
+                            g.tabs.push(id);
+                        }
+                    }
+                }
+                (root, main.focused)
+            };
+            let leaves = root.leaves();
+            let focused = leaves.get(focused_index).copied().unwrap_or(leaves[0]);
+            let mut ws = Workspace::new(focused);
+            ws.root = root;
+            ws.custom_name = ws_state.name;
+            self.workspaces.push(ws);
+        }
+        if self.workspaces.is_empty() {
+            let gid = self.alloc_group(None);
+            self.workspaces.push(Workspace::new(gid));
+        }
+        self.active = s.active_workspace.min(self.workspaces.len() - 1);
+    }
+
+    /// 保存されていたペインを作る（起動はまだしない）
+    fn restore_pane(&mut self, p: PaneState) -> PaneId {
+        if let Some(url) = p.url {
+            let id = self.alloc_id();
+            self.panes.insert(id, Pane::new_browser(url));
+            return id;
+        }
+        let id = self.alloc_pane(p.cwd.clone());
+        let pane = self.panes.get_mut(&id).expect("just allocated");
+        // conda 環境（base は自動で有効になることが多いので省略）→ Claude Code の順に再開
+        if let Some(env) = p.conda.as_ref().filter(|e| e.as_str() != "base") {
+            pane.restore_cmds.push(format!("conda activate {env}"));
+        }
+        if p.claude && self.settings.restore_claude && restore_claude_enabled() {
+            pane.restore_cmds.push("claude --continue".into());
+        }
+        // 起動前でも状態を保持しておく（開かずに終了しても失われないように）
+        pane.conda = p.conda;
+        pane.claude = if p.claude {
+            ClaudeState::Idle
+        } else {
+            ClaudeState::None
+        };
+        id
+    }
+
+    fn node_from_state(&mut self, state: NodeState) -> Node {
+        match state {
+            NodeState::Group { active, tabs } => {
+                let mut ids: Vec<PaneId> = tabs.into_iter().map(|p| self.restore_pane(p)).collect();
+                if ids.is_empty() {
+                    ids.push(self.alloc_pane(None));
+                }
+                let gid = self.alloc_id();
+                let active = active.min(ids.len() - 1);
+                self.groups.insert(gid, Group { tabs: ids, active });
+                Node::Leaf(gid)
+            }
+            NodeState::Pane(p) => {
+                let id = self.restore_pane(p);
+                let gid = self.alloc_id();
+                self.groups.insert(gid, Group::new(id));
+                Node::Leaf(gid)
+            }
+            NodeState::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => Node::Split {
+                axis,
+                ratio: ratio.clamp(0.1, 0.9),
+                first: Box::new(self.node_from_state(*first)),
+                second: Box::new(self.node_from_state(*second)),
+            },
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 表示
+    // -----------------------------------------------------------------------
+
+    fn workspace_name(&self, index: usize) -> String {
+        let Some(ws) = self.workspaces.get(index) else {
+            return String::new();
+        };
+        if let Some(name) = &ws.custom_name {
+            return name.clone();
+        }
+        // フォーカス中のペインのフォルダ名。ブラウザなどフォルダがなければ、ほかのターミナルのもの
+        self.ws_focused_pane(ws)
+            .and_then(|id| self.panes.get(&id))
+            .and_then(|p| p.cwd.as_deref())
+            .or_else(|| {
+                self.ws_panes(ws)
+                    .iter()
+                    .find_map(|id| self.panes.get(id).and_then(|p| p.cwd.as_deref()))
+            })
+            .and_then(folder_name)
+            .unwrap_or_else(|| format!("ワークスペース {}", index + 1))
+    }
+
+    fn workspace_claude(&self, ws: &Workspace) -> ClaudeState {
+        let states: Vec<ClaudeState> = self
+            .ws_panes(ws)
+            .iter()
+            .filter_map(|id| self.panes.get(id).map(|p| p.claude))
+            .collect();
+        for s in [ClaudeState::Asking, ClaudeState::Working, ClaudeState::Idle] {
+            if states.contains(&s) {
+                return s;
+            }
+        }
+        ClaudeState::None
+    }
+
+    /// ワークスペースの丸の色（中のペインでいちばん目を引くべき状態）
+    fn workspace_dot(&self, ws: &Workspace, selected: bool) -> Option<u32> {
+        let best = self
+            .ws_panes(ws)
+            .iter()
+            .filter_map(|id| self.panes.get(id))
+            .map(|p| {
+                // 表示中のワークスペースでは、見えているペインの「未確認」は数えない
+                let attention = p.attention && !selected;
+                (dot_priority(p.claude, attention), p.claude, attention)
+            })
+            .max_by_key(|(prio, _, _)| *prio)?;
+        let (_, claude, attention) = best;
+        let attention = attention || (ws.unread > 0 && claude == ClaudeState::None);
+        pane_dot(claude, attention)
+    }
+
+    /// 状態を表す小さな丸（色は `pane_dot` を参照）
+    fn status_dot(color: Option<u32>) -> Div {
+        div()
+            .flex_none()
+            .size(px(7.))
+            .rounded_full()
+            .when_some(color, |el, c| el.bg(rgb(c)))
+    }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let items = self.workspaces.iter().enumerate().map(|(i, ws)| {
+            let selected = i == self.active;
+            let name = self.workspace_name(i);
+            let focused = self.ws_focused_pane(ws).and_then(|id| self.panes.get(&id));
+            let cwd = focused.and_then(|p| p.cwd.as_deref()).map(short_path);
+            let branch = focused.and_then(|p| p.branch.clone());
+            let conda = focused.and_then(|p| p.conda.clone());
+            let claude = self.workspace_claude(ws);
+            let unread = ws.unread;
+            let note = ws.last_notification.clone();
+            let dot = self.workspace_dot(ws, selected);
+            // 未読の数字も状態の色で（入力待ち=赤、完了=緑 …）
+            let badge = dot.filter(|_| unread > 0).unwrap_or(th().accent);
+            let (fg, meta) = if selected {
+                (0xffffff, th().selected_meta)
+            } else {
+                (th().text, th().text_dim)
+            };
+
+            // 2 行目: ブランチ · フォルダ
+            let mut line2 = Vec::new();
+            if let Some(b) = branch {
+                line2.push(format!("⎇ {b}"));
+            }
+            if let Some(c) = cwd {
+                line2.push(c);
+            }
+            // 3 行目: conda · Claude の状態
+            let mut line3: Vec<(String, u32)> = Vec::new();
+            if let Some(env) = conda {
+                line3.push((
+                    format!("🐍 {env}"),
+                    if selected { meta } else { th().green_dim },
+                ));
+            }
+            match claude {
+                ClaudeState::Asking => line3.push((
+                    "Claude 入力待ち".into(),
+                    if selected { 0xffffff } else { th().red },
+                )),
+                ClaudeState::Working => line3.push((
+                    "Claude 実行中".into(),
+                    if selected { 0xffffff } else { th().amber },
+                )),
+                ClaudeState::Idle => line3.push(("Claude 待機中".into(), meta)),
+                ClaudeState::None => {}
+            }
+            let n_tabs = self.ws_panes(ws).len();
+            if n_tabs > 1 {
+                line3.push((format!("{n_tabs} タブ"), meta));
+            }
+
+            div()
+                .id(("ws", i))
+                .group("ws-item")
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .px(px(10.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(selected, |el| el.bg(rgb(th().selected_bg)))
+                .when(!selected, |el| el.hover(|s| s.bg(rgb(th().hover_bg))))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                        this.ws_menu = Some((i, ev.position));
+                        cx.notify();
+                    }),
+                )
+                .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                    if ev.click_count() >= 2 {
+                        this.open_rename(i, window, cx);
+                    } else {
+                        this.select_workspace(i, window, cx);
+                    }
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .child(Self::status_dot(dot))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(UI_TEXT))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(fg))
+                                .child(name),
+                        )
+                        .when(unread > 0, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .min_w(px(18.))
+                                    .h(px(16.))
+                                    .px(px(5.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .bg(rgb(badge))
+                                    .text_color(rgb(th().chrome_bg))
+                                    .child(unread.to_string()),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id(("ws-close", i))
+                                .flex_none()
+                                .invisible()
+                                .group_hover("ws-item", |s| s.visible())
+                                .px(px(4.))
+                                .rounded(px(4.))
+                                .text_size(px(11.))
+                                .text_color(rgb(meta))
+                                .hover(|s| s.bg(hsla(0., 0., 1., 0.12)).text_color(rgb(fg)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.close_workspace(i, window, cx);
+                                }))
+                                .child("✕"),
+                        ),
+                )
+                .when(!line2.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .pl(px(14.))
+                            .truncate()
+                            .text_size(px(UI_SMALL))
+                            .text_color(rgb(meta))
+                            .child(line2.join("  ·  ")),
+                    )
+                })
+                .when(!line3.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .pl(px(14.))
+                            .flex()
+                            .gap(px(8.))
+                            .text_size(px(UI_SMALL))
+                            .children(
+                                line3
+                                    .into_iter()
+                                    .map(|(t, c)| div().text_color(rgb(c)).child(t)),
+                            ),
+                    )
+                })
+                .when_some(note, |el, n| {
+                    el.child(
+                        div()
+                            .pl(px(14.))
+                            .truncate()
+                            .text_size(px(UI_SMALL))
+                            .text_color(rgb(if selected { meta } else { th().text_faint }))
+                            .child(n),
+                    )
+                })
+        });
+
+        div()
+            .id("sidebar")
+            .flex()
+            .flex_col()
+            .w(px(SIDEBAR_WIDTH))
+            .h_full()
+            .flex_none()
+            .bg(rgb(th().chrome_bg))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(TAB_BAR_HEIGHT))
+                    .flex_none()
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .pl(px(16.))
+                            .window_control_area(WindowControlArea::Drag)
+                            .text_size(px(UI_SMALL))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(th().text_faint))
+                            .child("WORKSPACES"),
+                    )
+                    .child(
+                        div()
+                            .id("ws-add")
+                            .mr(px(10.))
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_size(px(15.))
+                            .text_color(rgb(th().text_dim))
+                            .hover(|s| s.bg(rgb(th().hover_bg)).text_color(rgb(th().text)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_workspace(&NewWorkspace, window, cx);
+                            }))
+                            .child("+"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("ws-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .px(px(8.))
+                    .children(items),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_between()
+                    .pl(px(16.))
+                    .pr(px(10.))
+                    .py(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(th().text_faint))
+                            .child("Ctrl+Shift+G でフォルダ移動"),
+                    )
+                    .child(
+                        div()
+                            .id("open-settings")
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .px(px(8.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_size(px(UI_SMALL))
+                            .text_color(rgb(th().text_dim))
+                            .hover(|s| s.bg(rgb(th().hover_bg)).text_color(rgb(th().text)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings(&OpenSettings, window, cx);
+                            }))
+                            .child("⚙")
+                            .child("設定"),
+                    ),
+            )
+    }
+
+    // -----------------------------------------------------------------------
+    // 設定画面
+    // -----------------------------------------------------------------------
+
+    fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = th();
+        let section = |title: &'static str| {
+            div()
+                .pt(px(18.))
+                .pb(px(8.))
+                .text_size(px(UI_SMALL))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(c.text_dim))
+                .child(title)
+        };
+
+        // テーマ: 各テーマの配色でミニプレビューを描く
+        let current_theme = self.settings.theme.clone();
+        let theme_cards = THEMES.iter().enumerate().map(|(i, def)| {
+            let tc = derive(def);
+            let selected = def.name.eq_ignore_ascii_case(&current_theme);
+            let p = &def.palette;
+            let dots = (1..7).map(|k| div().size(px(8.)).rounded_full().bg(rgb(hex(p.ansi[k]))));
+            let name = def.name;
+            div()
+                .id(("theme", i))
+                .w(px(176.))
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .rounded(px(8.))
+                .border_2()
+                .border_color(if selected {
+                    rgb(c.accent)
+                } else {
+                    rgb(c.panel_border)
+                })
+                .cursor_pointer()
+                .hover(|s| s.border_color(rgb(c.accent)))
+                .on_click(cx.listener(move |this, _, window, cx| this.set_theme(name, window, cx)))
+                .child(
+                    div()
+                        .flex()
+                        .h(px(64.))
+                        .child(
+                            // サイドバー部分
+                            div()
+                                .w(px(36.))
+                                .h_full()
+                                .bg(rgb(tc.chrome_bg))
+                                .p(px(5.))
+                                .child(div().h(px(9.)).rounded(px(3.)).bg(rgb(tc.selected_bg))),
+                        )
+                        .child(
+                            // ターミナル部分
+                            div()
+                                .flex_1()
+                                .h_full()
+                                .bg(rgb(tc.term_bg))
+                                .px(px(8.))
+                                .py(px(7.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap(px(4.))
+                                        .text_size(px(10.))
+                                        .child(
+                                            div().text_color(rgb(hex(p.ansi[2]))).child("~/wimux"),
+                                        )
+                                        .child(div().text_color(rgb(tc.text)).child("$ claude")),
+                                )
+                                .child(div().flex().gap(px(4.)).children(dots)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(10.))
+                        .py(px(6.))
+                        .bg(rgb(c.menu_bg))
+                        .text_size(px(UI_SMALL))
+                        .text_color(rgb(c.text))
+                        .child(name)
+                        .when(selected, |el| {
+                            el.child(div().text_color(rgb(c.accent)).child("✓"))
+                        }),
+                )
+        });
+
+        // フォント
+        let current_font = self.settings.font_family.clone();
+        let mut fonts: Vec<Option<&'static str>> = vec![None];
+        fonts.extend(installed_fonts(cx).into_iter().map(Some));
+        let font_chips = fonts.into_iter().enumerate().map(|(i, f)| {
+            let selected = current_font.as_deref() == f;
+            let label = f.unwrap_or("自動");
+            div()
+                .id(("font", i))
+                .px(px(10.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(UI_SMALL))
+                .when(f.is_some(), |el| el.font_family(label))
+                .when(selected, |el| {
+                    el.bg(rgb(c.selected_bg)).text_color(rgb(0xffffff))
+                })
+                .when(!selected, |el| {
+                    el.bg(rgb(c.hover_bg))
+                        .text_color(rgb(c.text))
+                        .hover(|s| s.bg(rgb(c.hover_bg_strong)))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_font_family(f.map(str::to_string), cx)
+                }))
+                .child(label)
+        });
+
+        let step_button = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .bg(rgb(c.hover_bg))
+                .text_color(rgb(c.text))
+                .hover(|s| s.bg(rgb(c.hover_bg_strong)))
+                .child(label)
+        };
+
+        let restore = self.settings.restore_claude;
+        let toggle = div()
+            .id("toggle-restore-claude")
+            .w(px(38.))
+            .h(px(22.))
+            .p(px(3.))
+            .flex()
+            .rounded_full()
+            .cursor_pointer()
+            .bg(if restore {
+                rgb(c.accent)
+            } else {
+                rgb(c.hover_bg_strong)
+            })
+            .when(restore, |el| el.justify_end())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings.restore_claude = !this.settings.restore_claude;
+                settings::save(&this.settings);
+                cx.notify();
+            }))
+            .child(div().size(px(16.)).rounded_full().bg(rgb(0xffffff)));
+
+        let cdp = self.settings.browser_cdp;
+        let cdp_toggle = div()
+            .id("toggle-browser-cdp")
+            .w(px(38.))
+            .h(px(22.))
+            .p(px(3.))
+            .flex()
+            .flex_none()
+            .rounded_full()
+            .cursor_pointer()
+            .bg(if cdp {
+                rgb(c.accent)
+            } else {
+                rgb(c.hover_bg_strong)
+            })
+            .when(cdp, |el| el.justify_end())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings.browser_cdp = !this.settings.browser_cdp;
+                settings::save(&this.settings);
+                cx.notify();
+            }))
+            .child(div().size(px(16.)).rounded_full().bg(rgb(0xffffff)));
+
+        let row = |label: &'static str, hint: &'static str| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(UI_TEXT))
+                        .text_color(rgb(c.text))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(c.text_faint))
+                        .child(hint),
+                )
+        };
+
+        let panel = div()
+            .id("settings-panel")
+            .track_focus(&self.settings_focus)
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.close_settings(window, cx);
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .w(px(600.))
+            .max_w(relative(0.92))
+            .max_h(relative(0.86))
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(rgb(c.chrome_bg))
+            .border_1()
+            .border_color(rgb(c.panel_border))
+            .shadow_lg()
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_between()
+                    .px(px(20.))
+                    .h(px(48.))
+                    .border_b_1()
+                    .border_color(rgb(c.panel_border))
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c.text))
+                            .child("設定"),
+                    )
+                    .child(
+                        div()
+                            .id("settings-close")
+                            .size(px(26.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_color(rgb(c.text_dim))
+                            .hover(|s| s.bg(rgb(c.hover_bg)).text_color(rgb(c.text)))
+                            .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx)))
+                            .child("✕"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("settings-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(20.))
+                    .pb(px(20.))
+                    .child(section("テーマ"))
+                    .child(div().flex().flex_wrap().gap(px(10.)).children(theme_cards))
+                    .child(section("フォント"))
+                    .child(div().flex().flex_wrap().gap(px(6.)).children(font_chips))
+                    .child(
+                        div()
+                            .pt(px(6.))
+                            .text_size(px(11.))
+                            .text_color(rgb(c.text_faint))
+                            .child("インストールされている等幅フォントだけを表示しています。自動は JetBrains Mono → Cascadia Mono → … の順"),
+                    )
+                    .child(section("文字サイズ"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(step_button("font-smaller", "−").on_click(cx.listener(
+                                |this, _, _, cx| this.set_font_size(this.font_size - 1., cx),
+                            )))
+                            .child(
+                                div()
+                                    .w(px(36.))
+                                    .text_center()
+                                    .text_size(px(UI_TEXT))
+                                    .text_color(rgb(c.text))
+                                    .child(format!("{}", self.font_size)),
+                            )
+                            .child(step_button("font-larger", "+").on_click(cx.listener(
+                                |this, _, _, cx| this.set_font_size(this.font_size + 1., cx),
+                            )))
+                            .child(step_button("font-reset", "↺").on_click(cx.listener(
+                                |this, _, _, cx| this.set_font_size(DEFAULT_FONT_SIZE, cx),
+                            )))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(c.text_faint))
+                                    .child("Ctrl+= / Ctrl+- / Ctrl+0 でも変更できます"),
+                            ),
+                    )
+                    .child(section("ブラウザ"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(16.))
+                            .child(row(
+                                "AI からブラウザを操作できるようにする",
+                                "Claude Code などが Playwright / Chrome DevTools MCP で 127.0.0.1:9222 に接続できます（再起動後に反映）",
+                            ))
+                            .child(cdp_toggle),
+                    )
+                    .child(section("Claude Code"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(16.))
+                            .child(row(
+                                "起動時に会話を再開する",
+                                "前回 Claude Code を開いていたペインで claude --continue を実行します",
+                            ))
+                            .child(toggle),
+                    ),
+            );
+
+        div()
+            .id("settings-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .justify_center()
+            .items_center()
+            .bg(hsla(0., 0., 0., 0.5))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.close_settings(window, cx)),
+            )
+            .child(panel)
+    }
+
+    /// ワークスペースの右クリックメニュー
+    fn render_ws_menu(
+        &self,
+        index: usize,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let item = |id: &'static str, label: &'static str, color: u32| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .h(px(28.))
+                .px(px(10.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .text_size(px(UI_TEXT))
+                .text_color(rgb(color))
+                .hover(|s| s.bg(rgb(th().hover_bg_strong)))
+                .child(label)
+        };
+        let close_menu = |this: &mut Self, cx: &mut Context<Self>| {
+            this.ws_menu = None;
+            cx.notify();
+        };
+
+        div()
+            .id("ws-menu-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            // メニューの外をクリックしたら閉じる
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| close_menu(this, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, _, cx| close_menu(this, cx)),
+            )
+            .child(
+                div()
+                    .id("ws-menu")
+                    .absolute()
+                    .left(pos.x)
+                    .top(pos.y)
+                    .w(px(200.))
+                    .p(px(4.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .rounded(px(8.))
+                    .bg(rgb(th().menu_bg))
+                    .border_1()
+                    .border_color(rgb(th().panel_border))
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .px(px(10.))
+                            .pt(px(4.))
+                            .pb(px(4.))
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(rgb(th().text_faint))
+                            .child(self.workspace_name(index)),
+                    )
+                    .child(
+                        item("ws-menu-rename", "名前を変更", th().text).on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.ws_menu = None;
+                                this.open_rename(index, window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        item("ws-menu-new", "新しいワークスペース", th().text).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.ws_menu = None;
+                                this.new_workspace(&NewWorkspace, window, cx);
+                            }),
+                        ),
+                    )
+                    .child(div().my(px(3.)).h(px(1.)).bg(rgb(th().panel_border)))
+                    .child(item("ws-menu-delete", "削除", DANGER).on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            this.ws_menu = None;
+                            this.close_workspace(index, window, cx);
+                        },
+                    ))),
+            )
+    }
+
+    /// 区画ごとのタブの行
+    /// `edge`: この区画がウィンドウの上端 / 右上の角に接しているか。
+    /// 上端の区画はタブ行の空きでウィンドウをドラッグでき、右上の区画にはウィンドウボタンを置く
+    fn render_group_tabs(
+        &self,
+        gid: GroupId,
+        focused_group: bool,
+        edge: Edge,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let group = self.groups.get(&gid);
+        let tabs: Vec<PaneId> = group.map(|g| g.tabs.clone()).unwrap_or_default();
+        let active_index = group.map_or(0, |g| g.active);
+
+        let items = tabs.iter().enumerate().map(|(i, id)| {
+            let active = i == active_index;
+            let pane = self.panes.get(id);
+            let label = match pane {
+                Some(p) if p.is_browser() => {
+                    browser::short_label(p.title.as_deref(), p.url.as_deref().unwrap_or(""))
+                }
+                _ => pane
+                    .and_then(|p| p.cwd.as_deref().and_then(folder_name))
+                    .unwrap_or_else(|| format!("タブ {}", i + 1)),
+            };
+            let claude = pane.map_or(ClaudeState::None, |p| p.claude);
+            let attention = pane.is_some_and(|p| p.attention);
+            let dot = pane_dot(claude, attention);
+            let id = *id;
+
+            div()
+                .id(("tab", id))
+                .group("tab")
+                .relative()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(7.))
+                .h(px(TAB_HEIGHT))
+                .pl(px(12.))
+                .pr(px(6.))
+                .rounded_t(px(7.))
+                .cursor_pointer()
+                .text_size(px(UI_TAB))
+                .when(active, |el| {
+                    el.bg(rgb(th().term_bg)).text_color(rgb(if focused_group {
+                        th().text
+                    } else {
+                        th().text_dim
+                    }))
+                })
+                .when(!active, |el| {
+                    el.text_color(rgb(th().text_faint))
+                        .hover(|s| s.bg(rgb(th().hover_bg)).text_color(rgb(th().text_dim)))
+                })
+                // フォーカスしている区画の表示中タブには上に青い線
+                .when(active && focused_group, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(8.))
+                            .right(px(8.))
+                            .h(px(2.))
+                            .rounded_b(px(2.))
+                            .bg(rgb(th().accent)),
+                    )
+                })
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.select_tab(gid, i, window, cx)),
+                )
+                .when_some(dot, |el, c| el.child(Self::status_dot(Some(c))))
+                .child(div().max_w(px(160.)).truncate().child(label))
+                .child(
+                    div()
+                        .id(("tab-close", id))
+                        .size(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .text_size(px(10.))
+                        .text_color(rgb(th().text_dim))
+                        .when(!active, |el| {
+                            el.invisible().group_hover("tab", |s| s.visible())
+                        })
+                        .hover(|s| s.bg(rgb(th().hover_bg_strong)).text_color(rgb(th().text)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_pane_id(id, window, cx);
+                        }))
+                        .child("✕"),
+                )
+        });
+
+        let small_button = |id: (&'static str, usize), label: &'static str| {
+            div()
+                .id(id)
+                .mb(px(3.))
+                .size(px(24.))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_color(rgb(th().text_faint))
+                .hover(|s| s.bg(rgb(th().hover_bg)).text_color(rgb(th().text)))
+                .child(label)
+        };
+
+        div()
+            .id(("group-tabs", gid))
+            .flex()
+            .flex_none()
+            .items_end()
+            .gap(px(2.))
+            .h(px(TAB_BAR_HEIGHT))
+            .pl(px(4.))
+            .when(!(edge.top_right && custom_titlebar()), |el| el.pr(px(4.)))
+            .bg(rgb(th().chrome_bg))
+            .child(
+                div()
+                    .id(("tabs-scroll", gid))
+                    .flex()
+                    .items_end()
+                    .gap(px(2.))
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .children(items),
+            )
+            .child(
+                small_button(("tab-add", gid), "+")
+                    .text_size(px(15.))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.new_tab_in(gid, window, cx)),
+                    ),
+            )
+            // 空いているところ（上端の区画ならドラッグでウィンドウ移動、ダブルクリックで最大化）
+            .child(div().flex_1().h_full().when(edge.top, |el| {
+                el.window_control_area(WindowControlArea::Drag)
+            }))
+            // 区画を左右 / 上下に分割
+            .child(
+                small_button(("split-right", gid), "◫")
+                    .text_size(px(13.))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.focus_group(gid);
+                        this.split(Axis::Horizontal, window, cx);
+                    })),
+            )
+            .child(
+                small_button(("split-down", gid), "⊟")
+                    .text_size(px(13.))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.focus_group(gid);
+                        this.split(Axis::Vertical, window, cx);
+                    })),
+            )
+            .when(edge.top_right && custom_titlebar(), |el| {
+                el.child(Self::caption_buttons(window))
+            })
+    }
+
+    fn focus_group(&mut self, gid: GroupId) {
+        if let Some(ws) = self.workspaces.get_mut(self.active) {
+            ws.focused = gid;
+        }
+    }
+
+    /// Windows 風の最小化・最大化・閉じるボタン（独自タイトルバー用）
+    fn caption_buttons(window: &Window) -> impl IntoElement {
+        let button =
+            |id: &'static str, glyph: &'static str, area: WindowControlArea, close: bool| {
+                div()
+                    .id(id)
+                    .w(px(46.))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .font_family(CAPTION_FONT)
+                    .text_size(px(10.))
+                    .text_color(rgb(th().text_dim))
+                    .window_control_area(area)
+                    .when(close, |el| {
+                        el.hover(|s| s.bg(rgb(CLOSE_RED)).text_color(rgb(0xffffff)))
+                    })
+                    .when(!close, |el| {
+                        el.hover(|s| s.bg(rgb(th().hover_bg)).text_color(rgb(th().text)))
+                    })
+                    .child(glyph)
+            };
+        let max_glyph = if window.is_maximized() {
+            "\u{E923}"
+        } else {
+            "\u{E922}"
+        };
+        div()
+            .flex()
+            .flex_none()
+            .h_full()
+            .child(button("min", "\u{E921}", WindowControlArea::Min, false))
+            .child(button("max", max_glyph, WindowControlArea::Max, false))
+            .child(button("close", "\u{E8BB}", WindowControlArea::Close, true))
+    }
+
+    /// ブラウザのタブ: 操作バー＋ WebView を重ねる領域
+    fn render_browser(&self, id: PaneId) -> AnyElement {
+        let c = th();
+        let pane = &self.panes[&id];
+        let url_field = pane.url_field.clone();
+        let blank = pane.url.as_deref().is_none_or(str::is_empty);
+        let loading = pane.loading;
+        let browser = pane.browser.clone();
+        let error = pane.browser_error.clone();
+        let show = !self.overlay_open();
+
+        let nav_button =
+            |key: &'static str, label: &'static str, b: Option<Rc<Browser>>, f: fn(&Browser)| {
+                div()
+                    .id((key, id))
+                    .size(px(26.))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_color(rgb(c.text_dim))
+                    .hover(|s| s.bg(rgb(c.hover_bg)).text_color(rgb(c.text)))
+                    .on_click(move |_, _, _| {
+                        if let Some(b) = &b {
+                            f(b);
+                        }
+                    })
+                    .child(label)
+            };
+
+        let toolbar = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.))
+            .h(px(36.))
+            .px(px(6.))
+            .bg(rgb(c.term_bg))
+            .border_b_1()
+            .border_color(rgb(c.divider))
+            .child(nav_button("web-back", "←", browser.clone(), Browser::back))
+            .child(nav_button(
+                "web-forward",
+                "→",
+                browser.clone(),
+                Browser::forward,
+            ))
+            .child(nav_button(
+                "web-reload",
+                if loading { "✕" } else { "↻" },
+                browser.clone(),
+                Browser::reload,
+            ))
+            .child(
+                div()
+                    .id(("web-url", id))
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(26.))
+                    .ml(px(4.))
+                    .px(px(10.))
+                    .rounded(px(6.))
+                    .bg(rgb(c.chrome_bg))
+                    .text_size(px(UI_SMALL))
+                    .when_some(url_field, |el, f| el.child(f)),
+            );
+
+        // WebView を重ねる領域。描画のたびに位置を合わせる
+        let area = div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .bg(rgb(c.term_bg))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(16.))
+                    .left(px(16.))
+                    .text_size(px(UI_SMALL))
+                    .text_color(rgb(c.text_faint))
+                    .child(match (&browser, &error) {
+                        (Some(_), _) => String::new(),
+                        (None, Some(e)) => format!("ブラウザを開けませんでした: {e}"),
+                        (None, None) if blank => {
+                            "上の欄に URL を入力して Enter（例: 3000 → localhost:3000）".into()
+                        }
+                        (None, None) => "ブラウザを準備しています…".into(),
+                    }),
+            )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        if let Some(b) = &browser {
+                            b.set_visible(show);
+                            b.set_bounds(bounds, window.scale_factor());
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(toolbar)
+            .child(area)
+            .into_any_element()
+    }
+
+    fn render_node(
+        &self,
+        node: &Node,
+        focused_group: GroupId,
+        rects: &HashMap<GroupId, crate::workspace::Rect>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match node {
+            Node::Leaf(gid) => {
+                let is_focused = *gid == focused_group;
+                let pane_id = self.groups.get(gid).and_then(|g| g.active_pane());
+                let pane = pane_id.and_then(|id| self.panes.get(&id));
+                let view = pane.and_then(|p| p.view.clone());
+                // 見ていない間に何かあった区画は、状態の色の枠で囲む
+                let attention = pane
+                    .filter(|p| p.attention)
+                    .and_then(|p| pane_dot(p.claude, true));
+                let browser_el = match (pane_id, pane) {
+                    (Some(id), Some(p)) if p.is_browser() => Some(self.render_browser(id)),
+                    _ => None,
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(self.render_group_tabs(
+                        *gid,
+                        is_focused,
+                        Edge::of(rects.get(gid)),
+                        window,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .bg(rgb(th().term_bg))
+                            .border_2()
+                            .border_color(rgb(attention.unwrap_or(th().term_bg)))
+                            .when_some(view, |el, v| el.child(v))
+                            .when_some(browser_el, |el, b| el.child(b)),
+                    )
+                    .into_any_element()
+            }
+            Node::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let first_el = self.render_node(first, focused_group, rects, window, cx);
+                let second_el = self.render_node(second, focused_group, rects, window, cx);
+                let horizontal = *axis == Axis::Horizontal;
+                let first_box = div()
+                    .flex_none()
+                    .min_w_0()
+                    .min_h_0()
+                    .when(horizontal, |el| el.h_full().w(relative(*ratio)))
+                    .when(!horizontal, |el| el.w_full().h(relative(*ratio)))
+                    .child(first_el);
+                let divider = div()
+                    .flex_none()
+                    .bg(rgb(th().divider))
+                    .when(horizontal, |el| el.w(px(1.)).h_full())
+                    .when(!horizontal, |el| el.h(px(1.)).w_full());
+                let second_box = div().flex_1().min_w_0().min_h_0().child(second_el);
+                div()
+                    .flex()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .when(horizontal, |el| el.flex_row())
+                    .when(!horizontal, |el| el.flex_col())
+                    .child(first_box)
+                    .child(divider)
+                    .child(second_box)
+                    .into_any_element()
+            }
+        }
+    }
+}
+
+impl Render for WimuxWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 表示する（各区画で選ばれている）タブだけ起動する（遅延起動）
+        let (root, focused_group) = match self.workspaces.get(self.active) {
+            Some(ws) => (ws.root.clone(), ws.focused),
+            None => (Node::Leaf(0), 0),
+        };
+        let visible: Vec<PaneId> = root
+            .leaves()
+            .iter()
+            .filter_map(|g| self.groups.get(g).and_then(|g| g.active_pane()))
+            .collect();
+        for id in &visible {
+            self.ensure_view(*id, window, cx);
+        }
+        self.sync_browsers(&visible, window, cx);
+        window.set_window_title(&format!("{} — {}", crate::APP_NAME, self.workspace_name(self.active)));
+
+        let rects: HashMap<GroupId, crate::workspace::Rect> = root.rects().into_iter().collect();
+        let panes = self.render_node(&root, focused_group, &rects, window, cx);
+        let picker = self.picker.as_ref().map(|(p, _, _)| p.clone());
+
+        div()
+            .id("wimux")
+            .key_context(CONTEXT)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::new_workspace))
+            .on_action(cx.listener(Self::next_workspace))
+            .on_action(cx.listener(Self::prev_workspace))
+            .on_action(cx.listener(Self::rename_workspace))
+            .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::prev_tab))
+            .on_action(cx.listener(Self::close_pane))
+            .on_action(cx.listener(Self::split_right))
+            .on_action(cx.listener(Self::split_down))
+            .on_action(cx.listener(Self::focus_left))
+            .on_action(cx.listener(Self::focus_right))
+            .on_action(cx.listener(Self::focus_up))
+            .on_action(cx.listener(Self::focus_down))
+            .on_action(cx.listener(Self::open_dir_picker))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::zoom_reset))
+            .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::open_browser))
+            .relative()
+            .flex()
+            .flex_row()
+            .size_full()
+            .bg(rgb(th().chrome_bg))
+            .text_color(rgb(th().text))
+            .text_size(px(UI_TEXT))
+            .when(self.sidebar_visible, |el| el.child(self.render_sidebar(cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(div().flex_1().min_h_0().child(panes)),
+            )
+            .when(self.settings_open, |el| el.child(self.render_settings(cx)))
+            .when_some(self.ws_menu, |el, (index, pos)| {
+                el.child(self.render_ws_menu(index, pos, cx))
+            })
+            .when_some(picker, |el, picker| {
+                el.child(
+                    div()
+                        .id("picker-overlay")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .justify_center()
+                        .pt(px(72.))
+                        .bg(hsla(0., 0., 0., 0.45))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.picker = None;
+                                this.focus_active(window, cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .id("picker-box")
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(picker),
+                        ),
+                )
+            })
+    }
+}
+
+/// ホームフォルダを ~ に置き換えた短い表示
+fn short_path(path: &str) -> String {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    if !home.is_empty() {
+        let lower_path = path.to_lowercase();
+        let lower_home = home.to_lowercase();
+        if lower_path == lower_home {
+            return "~".into();
+        }
+        if lower_path.starts_with(&lower_home)
+            && matches!(path.as_bytes().get(home.len()), Some(b'\\') | Some(b'/'))
+        {
+            return format!("~{}", &path[home.len()..]);
+        }
+    }
+    path.to_string()
+}
+
+/// cwd から上にたどって .git を探し、現在のブランチ名を返す
+fn git_branch(cwd: &str) -> Option<String> {
+    let mut dir = Some(std::path::Path::new(cwd));
+    while let Some(d) = dir {
+        let git = d.join(".git");
+        let head_path = if git.is_dir() {
+            git.join("HEAD")
+        } else if git.is_file() {
+            // worktree / submodule: 「gitdir: <path>」
+            let text = std::fs::read_to_string(&git).ok()?;
+            let gitdir = text.trim().strip_prefix("gitdir:")?.trim();
+            let gitdir = std::path::Path::new(gitdir);
+            let gitdir = if gitdir.is_absolute() {
+                gitdir.to_path_buf()
+            } else {
+                d.join(gitdir)
+            };
+            gitdir.join("HEAD")
+        } else {
+            dir = d.parent();
+            continue;
+        };
+        let head = std::fs::read_to_string(head_path).ok()?;
+        let head = head.trim();
+        return Some(match head.strip_prefix("ref: refs/heads/") {
+            Some(branch) => branch.to_string(),
+            None => head.chars().take(7).collect(),
+        });
+    }
+    None
+}
+
+/// 独自タイトルバー（OS のタイトルバーを消して、タブの行に統合する）を使うか
+pub fn custom_titlebar() -> bool {
+    cfg!(windows) || std::env::var("WIMUX_CUSTOM_TITLEBAR").is_ok_and(|v| v == "1")
+}
+
+/// パスの末尾のフォルダ名
+fn folder_name(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Windows 形式（\）と Unix 形式（/）のどちらでも末尾を取る
+    let name = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed);
+    Some(if name.is_empty() || name.ends_with(':') {
+        format!("{trimmed}\\")
+    } else {
+        name.to_string()
+    })
+}
+
+/// `WIMUX_RESTORE_CLAUDE=0` で Claude Code の自動再開を止められる
+fn restore_claude_enabled() -> bool {
+    std::env::var("WIMUX_RESTORE_CLAUDE").map_or(true, |v| v != "0")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClaudeState, claude_state_from_title, folder_name};
+
+    #[test]
+    fn claude_title_detection() {
+        assert_eq!(
+            claude_state_from_title("✳ Claude Code"),
+            Some(ClaudeState::Idle)
+        );
+        assert_eq!(
+            claude_state_from_title("⠂ Claude Code"),
+            Some(ClaudeState::Working)
+        );
+        assert_eq!(
+            claude_state_from_title("C:\\Users\\kento - PowerShell"),
+            None
+        );
+    }
+
+    #[test]
+    fn folder_names() {
+        assert_eq!(
+            folder_name("C:\\Users\\kento\\wimux").as_deref(),
+            Some("wimux")
+        );
+        assert_eq!(folder_name("/home/a/b/").as_deref(), Some("b"));
+    }
+}
+
+/// v1 の分割ツリーからペインを順に取り出す
+fn flatten_panes(node: NodeState) -> Vec<PaneState> {
+    match node {
+        NodeState::Pane(p) => vec![p],
+        NodeState::Group { tabs, .. } => tabs,
+        NodeState::Split { first, second, .. } => {
+            let mut v = flatten_panes(*first);
+            v.extend(flatten_panes(*second));
+            v
+        }
+    }
+}
+
+/// 区画がウィンドウの端に接しているか
+#[derive(Clone, Copy)]
+struct Edge {
+    top: bool,
+    top_right: bool,
+}
+
+impl Edge {
+    fn of(rect: Option<&crate::workspace::Rect>) -> Self {
+        const EPS: f32 = 1e-4;
+        match rect {
+            Some(r) => {
+                let top = r.y < EPS;
+                Self {
+                    top,
+                    top_right: top && (r.x + r.w) > 1. - EPS,
+                }
+            }
+            None => Self {
+                top: false,
+                top_right: false,
+            },
+        }
+    }
+}
