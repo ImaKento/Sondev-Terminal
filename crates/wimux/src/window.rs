@@ -382,14 +382,18 @@ impl WimuxWindow {
         this._subs.push(sub);
 
         // ブラウザからのお知らせ（タイトル・URL の変化）
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             while let Ok(first) = browser_rx.recv_async().await {
                 let mut msgs = vec![first];
                 msgs.extend(browser_rx.try_iter());
                 let alive = this
-                    .update(cx, |this, cx| {
+                    .update_in(cx, |this, window, cx| {
                         for (id, msg) in msgs {
-                            this.on_browser_msg(id, msg, cx);
+                            if let BrowserMsg::NewWindow(url) = msg {
+                                this.open_new_window_from(id, url, window, cx);
+                            } else {
+                                this.on_browser_msg(id, msg, cx);
+                            }
                         }
                         cx.notify();
                     })
@@ -1086,6 +1090,24 @@ impl WimuxWindow {
         self.open_browser_in(gid, url, window, cx);
     }
 
+    /// ブラウザのページが新しいウィンドウを開こうとした（右クリックの「新しいウィンドウで開く」など）:
+    /// 別ウィンドウにはせず、そのブラウザと同じ区画の新しいタブで開く
+    fn open_new_window_from(
+        &mut self,
+        id: PaneId,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((wi, gid, _)) = self.locate(id) else {
+            return;
+        };
+        if wi != self.active || url.is_empty() {
+            return;
+        }
+        self.open_browser_in(gid, url, window, cx);
+    }
+
     /// URL 欄（入力欄）を（まだなら）作る
     fn ensure_url_field(
         &mut self,
@@ -1173,6 +1195,8 @@ impl WimuxWindow {
         match msg {
             BrowserMsg::Title(t) => pane.title = Some(t),
             BrowserMsg::Loading(l) => pane.loading = l,
+            // 新しいタブを開くのは上（受信側）で処理する
+            BrowserMsg::NewWindow(_) => {}
             BrowserMsg::Url(u) => {
                 if u.is_empty() || u == "about:blank" {
                     return;

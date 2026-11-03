@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use gpui_kit::{Bounds, Pixels};
 use wry::dpi::{PhysicalPosition, PhysicalSize};
 use wry::raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
-use wry::{PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
+use wry::{NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 
 use crate::workspace::PaneId;
 
@@ -43,6 +43,9 @@ pub enum BrowserMsg {
     Title(String),
     Url(String),
     Loading(bool),
+    /// ページが新しいウィンドウを開こうとした（右クリックの「新しいウィンドウで開く」、
+    /// `target="_blank"` のリンク、`window.open`）。別ウィンドウは出さず、同じ区画の新しいタブで開く
+    NewWindow(String),
 }
 
 pub type BrowserSender = flume::Sender<(PaneId, BrowserMsg)>;
@@ -69,7 +72,8 @@ impl Browser {
     ) -> anyhow::Result<Self> {
         let host = host::HostWindow::new(owner.0)?;
         let tx_title = tx.clone();
-        let tx_load = tx;
+        let tx_load = tx.clone();
+        let tx_new = tx;
         let webview = WebViewBuilder::new_with_web_context(context)
             .with_url(url)
             .with_bounds(Rect {
@@ -86,6 +90,10 @@ impl Browser {
                 let loading = matches!(event, PageLoadEvent::Started);
                 let _ = tx_load.send((id, BrowserMsg::Loading(loading)));
                 let _ = tx_load.send((id, BrowserMsg::Url(url)));
+            })
+            .with_new_window_req_handler(move |url, _features| {
+                let _ = tx_new.send((id, BrowserMsg::NewWindow(url)));
+                NewWindowResponse::Deny
             })
             .build_as_child(&host)?;
         Ok(Self {

@@ -195,6 +195,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 ### Phase 4: ブラウザペイン（実装済み・Windows 未確認）
 - [x] `wry` で WebView2 を、メインウィンドウに所有された枠なしウィンドウに入れて区画の位置に重ねる（`browser.rs`）。タブの 1 種類として扱い、URL は保存・復元する
 - [x] 操作バー（戻る・進む・再読み込み・URL 欄）。URL 欄をクリックすると入力ポップアップ
+- [x] 新しいウィンドウの要求（右クリックの「新しいウィンドウで開く」・`target="_blank"`・`window.open`）は別ウィンドウにせず、同じ区画の新しいタブで開く（`with_new_window_req_handler` → `BrowserMsg::NewWindow`）
 - [x] 見えない区画・別ワークスペース・ポップアップ表示中は `set_visible(false)` で隠す（子ウィンドウは GPUI の上に重なるため）
 - [x] 設定で「AI からブラウザを操作」を ON にすると `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`（再起動後に反映）
 - [ ] Windows での動作確認（Linux はブラウザペイン非対応）
