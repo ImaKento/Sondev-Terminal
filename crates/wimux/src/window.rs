@@ -37,6 +37,19 @@ gpui_kit::actions!(
         FocusRight,
         FocusUp,
         FocusDown,
+        ResizeLeft,
+        ResizeRight,
+        ResizeUp,
+        ResizeDown,
+        SelectWorkspace1,
+        SelectWorkspace2,
+        SelectWorkspace3,
+        SelectWorkspace4,
+        SelectWorkspace5,
+        SelectWorkspace6,
+        SelectWorkspace7,
+        SelectWorkspace8,
+        SelectWorkspace9,
         OpenDirPicker,
         ZoomIn,
         ZoomOut,
@@ -62,13 +75,35 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-shift-t", NewTab, c),
         KeyBinding::new("ctrl-tab", NextTab, c),
         KeyBinding::new("ctrl-shift-tab", PrevTab, c),
+        KeyBinding::new("ctrl-]", NextTab, c),
+        KeyBinding::new("ctrl-[", PrevTab, c),
         KeyBinding::new("ctrl-shift-w", ClosePane, c),
-        KeyBinding::new("ctrl-shift-d", SplitRight, c),
+        // Ctrl+D = 右に分割（左右に並べる）、Ctrl+Shift+D = 下に分割（上下に並べる）
+        KeyBinding::new("ctrl-d", SplitRight, c),
+        KeyBinding::new("ctrl-shift-d", SplitDown, c),
         KeyBinding::new("ctrl-shift-e", SplitDown, c),
+        KeyBinding::new("ctrl-left", FocusLeft, c),
+        KeyBinding::new("ctrl-right", FocusRight, c),
+        KeyBinding::new("ctrl-up", FocusUp, c),
+        KeyBinding::new("ctrl-down", FocusDown, c),
         KeyBinding::new("alt-left", FocusLeft, c),
         KeyBinding::new("alt-right", FocusRight, c),
         KeyBinding::new("alt-up", FocusUp, c),
         KeyBinding::new("alt-down", FocusDown, c),
+        // 分割の境界を動かす（Windows Terminal と同じ）
+        KeyBinding::new("alt-shift-left", ResizeLeft, c),
+        KeyBinding::new("alt-shift-right", ResizeRight, c),
+        KeyBinding::new("alt-shift-up", ResizeUp, c),
+        KeyBinding::new("alt-shift-down", ResizeDown, c),
+        KeyBinding::new("ctrl-1", SelectWorkspace1, c),
+        KeyBinding::new("ctrl-2", SelectWorkspace2, c),
+        KeyBinding::new("ctrl-3", SelectWorkspace3, c),
+        KeyBinding::new("ctrl-4", SelectWorkspace4, c),
+        KeyBinding::new("ctrl-5", SelectWorkspace5, c),
+        KeyBinding::new("ctrl-6", SelectWorkspace6, c),
+        KeyBinding::new("ctrl-7", SelectWorkspace7, c),
+        KeyBinding::new("ctrl-8", SelectWorkspace8, c),
+        KeyBinding::new("ctrl-9", SelectWorkspace9, c),
         KeyBinding::new("ctrl-shift-g", OpenDirPicker, c),
         KeyBinding::new("ctrl-=", ZoomIn, c),
         KeyBinding::new("ctrl-+", ZoomIn, c),
@@ -89,6 +124,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-a", NoAction, Some("TextField")),
         KeyBinding::new("ctrl-v", NoAction, Some("TextField")),
         KeyBinding::new("tab", NoAction, Some("TextField")),
+        // 入力欄では Ctrl+←→ は単語単位のカーソル移動
+        KeyBinding::new("ctrl-left", NoAction, Some("TextField")),
+        KeyBinding::new("ctrl-right", NoAction, Some("TextField")),
     ]
 }
 
@@ -151,6 +189,20 @@ fn claude_state_from_title(title: &str) -> Option<ClaudeState> {
 
 /// ドラッグ中のタブ
 #[derive(Clone)]
+/// ドラッグ中の分割の境界（GPUI のドラッグの仕組みを使う）。根からの道で分割を特定する
+struct DraggedDivider {
+    path: Vec<bool>,
+}
+
+/// 境界のドラッグ中にマウスについてくる見た目（何も出さない）
+struct DividerPreview;
+
+impl Render for DividerPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
 struct DraggedTab {
     pane: PaneId,
     label: String,
@@ -318,6 +370,8 @@ pub struct WimuxWindow {
     sidebar_visible: bool,
     /// 右クリックメニュー（対象のワークスペース番号, 表示位置）
     ws_menu: Option<(usize, Point<Pixels>)>,
+    /// 分割の境界をマウスでドラッグ中（タブのドラッグと区別するため）
+    resizing: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -345,6 +399,7 @@ impl WimuxWindow {
             font_size: settings.font_size,
             sidebar_visible: true,
             ws_menu: None,
+            resizing: false,
             focus_handle: cx.focus_handle(),
             _subs: Vec::new(),
         };
@@ -626,6 +681,36 @@ impl WimuxWindow {
         if n > 0 {
             self.select_workspace((self.active + n - 1) % n, window, cx);
         }
+    }
+
+    fn select_ws_1(&mut self, _: &SelectWorkspace1, w: &mut Window, cx: &mut Context<Self>) {
+        self.select_workspace(0, w, cx);
+    }
+    fn select_ws_2(&mut self, _: &SelectWorkspace2, w: &mut Window, cx: &mut Context<Self>) {
+        self.select_workspace(1, w, cx);
+    }
+    fn select_ws_3(&mut self, _: &SelectWorkspace3, w: &mut Window, cx: &mut Context<Self>) {
+        self.select_workspace(2, w, cx);
+    }
+    fn select_ws_4(&mut self, _: &SelectWorkspace4, w: &mut Window, cx: &mut Context<Self>) {
+        self.select_workspace(3, w, cx);
+    }
+    fn select_ws_5(&mut self, _: &SelectWorkspace5, w: &mut Window, cx: &mut Context<Self>) {
+        self.select_workspace(4, w, cx);
+    }
+    fn select_ws_6(&mut self, _: &SelectWorkspace6, w: &mut Window, cx: &mut Context<Self>) {
+        self.select_workspace(5, w, cx);
+    }
+    fn select_ws_7(&mut self, _: &SelectWorkspace7, w: &mut Window, cx: &mut Context<Self>) {
+        self.select_workspace(6, w, cx);
+    }
+    fn select_ws_8(&mut self, _: &SelectWorkspace8, w: &mut Window, cx: &mut Context<Self>) {
+        self.select_workspace(7, w, cx);
+    }
+    /// Ctrl+9 は最後のワークスペース（ブラウザのタブと同じ）
+    fn select_ws_9(&mut self, _: &SelectWorkspace9, w: &mut Window, cx: &mut Context<Self>) {
+        let last = self.workspaces.len().saturating_sub(1);
+        self.select_workspace(last, w, cx);
     }
 
     fn rename_workspace(
@@ -999,6 +1084,59 @@ impl WimuxWindow {
     }
     fn focus_down(&mut self, _: &FocusDown, w: &mut Window, cx: &mut Context<Self>) {
         self.move_focus(Direction::Down, w, cx);
+    }
+
+    /// Alt+Shift+矢印: フォーカス中の区画の境界をその方向へ動かす
+    fn resize_focused(&mut self, dir: Direction, cx: &mut Context<Self>) {
+        let Some(ws) = self.workspaces.get_mut(self.active) else {
+            return;
+        };
+        if ws.root.nudge(ws.focused, dir, 0.05) {
+            self.schedule_save(cx);
+            cx.notify();
+        }
+    }
+
+    fn resize_left(&mut self, _: &ResizeLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.resize_focused(Direction::Left, cx);
+    }
+    fn resize_right(&mut self, _: &ResizeRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.resize_focused(Direction::Right, cx);
+    }
+    fn resize_up(&mut self, _: &ResizeUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.resize_focused(Direction::Up, cx);
+    }
+    fn resize_down(&mut self, _: &ResizeDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.resize_focused(Direction::Down, cx);
+    }
+
+    /// 分割の境界のドラッグ中: マウスの位置から比率を決める
+    fn on_divider_drag(&mut self, path: &[bool], axis: Axis, ev: &DragMoveEvent<DraggedDivider>, cx: &mut Context<Self>) {
+        // どの分割の容器にも届くので、つかんだ境界の分割だけを動かす
+        if ev.drag(cx).path != path {
+            return;
+        }
+        let b = ev.bounds;
+        let pos = ev.event.position;
+        let ratio = match axis {
+            Axis::Horizontal => (pos.x - b.origin.x) / b.size.width,
+            Axis::Vertical => (pos.y - b.origin.y) / b.size.height,
+        };
+        if !ratio.is_finite() {
+            return;
+        }
+        let Some(ws) = self.workspaces.get_mut(self.active) else {
+            return;
+        };
+        if ws.root.set_ratio_at(path, ratio) {
+            self.schedule_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// タブをドラッグ中か（境界のドラッグは除く）
+    fn tab_dragging(&self, cx: &App) -> bool {
+        cx.has_active_drag() && !self.resizing
     }
 
     /// Ctrl+Shift+G: ターミナルで `cdi` を実行する（フォルダ履歴をターミナル内で選ぶ）
@@ -2709,7 +2847,7 @@ impl WimuxWindow {
                 .child(label)
         };
 
-        let dragging = cx.has_active_drag();
+        let dragging = self.tab_dragging(cx);
         div()
             .id(("group-tabs", gid))
             // タブの行の空いているところに落とすと最後に加える
@@ -2929,6 +3067,7 @@ impl WimuxWindow {
     fn render_node(
         &self,
         node: &Node,
+        path: Vec<bool>,
         focused_group: GroupId,
         rects: &HashMap<GroupId, crate::workspace::Rect>,
         window: &Window,
@@ -2972,7 +3111,7 @@ impl WimuxWindow {
                             .border_color(rgb(attention.unwrap_or(th().term_bg)))
                             .when_some(view, |el, v| el.child(v))
                             .when_some(browser_el, |el, b| el.child(b))
-                            .when(cx.has_active_drag(), |el| {
+                            .when(self.tab_dragging(cx), |el| {
                                 el.child(self.render_drop_overlay(*gid, cx))
                             }),
                     )
@@ -2984,9 +3123,52 @@ impl WimuxWindow {
                 first,
                 second,
             } => {
-                let first_el = self.render_node(first, focused_group, rects, window, cx);
-                let second_el = self.render_node(second, focused_group, rects, window, cx);
+                let mut first_path = path.clone();
+                first_path.push(false);
+                let mut second_path = path.clone();
+                second_path.push(true);
+                let first_el = self.render_node(first, first_path, focused_group, rects, window, cx);
+                let second_el = self.render_node(second, second_path, focused_group, rects, window, cx);
                 let horizontal = *axis == Axis::Horizontal;
+                let axis = *axis;
+                // 境界をつかむところ（線は 1px だが、つかめる幅は広げる）。区画より上に重ねる
+                const GRIP: f32 = 7.;
+                let handle_id: SharedString = format!(
+                    "divider-{}",
+                    path.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>()
+                )
+                .into();
+                let handle = div()
+                    .id(handle_id)
+                    .absolute()
+                    .occlude()
+                    .when(horizontal, |el| {
+                        el.top_0()
+                            .bottom_0()
+                            .left(relative(*ratio))
+                            .ml(px(-(GRIP - 1.) / 2.))
+                            .w(px(GRIP))
+                            .cursor_col_resize()
+                    })
+                    .when(!horizontal, |el| {
+                        el.left_0()
+                            .right_0()
+                            .top(relative(*ratio))
+                            .mt(px(-(GRIP - 1.) / 2.))
+                            .h(px(GRIP))
+                            .cursor_row_resize()
+                    })
+                    .hover(|s| s.bg(rgba((th().accent << 8) | 0x60)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.resizing = true;
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_drag(DraggedDivider { path: path.clone() }, |_, _, _, cx| {
+                        cx.new(|_| DividerPreview)
+                    });
                 let first_box = div()
                     .flex_none()
                     .min_w_0()
@@ -3001,15 +3183,21 @@ impl WimuxWindow {
                     .when(!horizontal, |el| el.h(px(1.)).w_full());
                 let second_box = div().flex_1().min_w_0().min_h_0().child(second_el);
                 div()
+                    .id(SharedString::from(format!("split-{path:?}")))
+                    .relative()
                     .flex()
                     .size_full()
                     .min_w_0()
                     .min_h_0()
                     .when(horizontal, |el| el.flex_row())
                     .when(!horizontal, |el| el.flex_col())
+                    .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedDivider>, _, cx| {
+                        this.on_divider_drag(&path, axis, ev, cx);
+                    }))
                     .child(first_box)
                     .child(divider)
                     .child(second_box)
+                    .child(handle)
                     .into_any_element()
             }
         }
@@ -3035,7 +3223,11 @@ impl Render for WimuxWindow {
         window.set_window_title(&format!("{} — {}", crate::APP_NAME, self.workspace_name(self.active)));
 
         let rects: HashMap<GroupId, crate::workspace::Rect> = root.rects().into_iter().collect();
-        let panes = self.render_node(&root, focused_group, &rects, window, cx);
+        // 境界のドラッグが終わったら印を消す
+        if self.resizing && !cx.has_active_drag() {
+            self.resizing = false;
+        }
+        let panes = self.render_node(&root, Vec::new(), focused_group, &rects, window, cx);
         let picker = self.picker.as_ref().map(|(p, _, _)| p.clone());
 
         div()
@@ -3056,6 +3248,19 @@ impl Render for WimuxWindow {
             .on_action(cx.listener(Self::focus_right))
             .on_action(cx.listener(Self::focus_up))
             .on_action(cx.listener(Self::focus_down))
+            .on_action(cx.listener(Self::resize_left))
+            .on_action(cx.listener(Self::resize_right))
+            .on_action(cx.listener(Self::resize_up))
+            .on_action(cx.listener(Self::resize_down))
+            .on_action(cx.listener(Self::select_ws_1))
+            .on_action(cx.listener(Self::select_ws_2))
+            .on_action(cx.listener(Self::select_ws_3))
+            .on_action(cx.listener(Self::select_ws_4))
+            .on_action(cx.listener(Self::select_ws_5))
+            .on_action(cx.listener(Self::select_ws_6))
+            .on_action(cx.listener(Self::select_ws_7))
+            .on_action(cx.listener(Self::select_ws_8))
+            .on_action(cx.listener(Self::select_ws_9))
             .on_action(cx.listener(Self::open_dir_picker))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))

@@ -179,6 +179,69 @@ impl Node {
         }
     }
 
+    /// 分割の比率の下限・上限（区画が潰れて見えなくならないように）
+    pub const MIN_RATIO: f32 = 0.08;
+    pub const MAX_RATIO: f32 = 0.92;
+
+    /// 根からたどった道（false = first, true = second）にある分割の比率を変える
+    pub fn set_ratio_at(&mut self, path: &[bool], value: f32) -> bool {
+        match (self, path.split_first()) {
+            (Node::Split { ratio, .. }, None) => {
+                *ratio = value.clamp(Self::MIN_RATIO, Self::MAX_RATIO);
+                true
+            }
+            (Node::Split { first, second, .. }, Some((go_second, rest))) => {
+                if *go_second {
+                    second.set_ratio_at(rest, value)
+                } else {
+                    first.set_ratio_at(rest, value)
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// キーで分割の境界を動かす: `target` を含む分割のうち、`dir` の向き（左右 / 上下）で
+    /// 一番内側のものの境界を、`dir` の方向へ `delta` だけずらす
+    pub fn nudge(&mut self, target: PaneId, dir: Direction, delta: f32) -> bool {
+        let want = match dir {
+            Direction::Left | Direction::Right => Axis::Horizontal,
+            Direction::Up | Direction::Down => Axis::Vertical,
+        };
+        let sign = match dir {
+            Direction::Left | Direction::Up => -1.,
+            Direction::Right | Direction::Down => 1.,
+        };
+        self.nudge_inner(target, want, sign * delta)
+    }
+
+    fn nudge_inner(&mut self, target: PaneId, want: Axis, delta: f32) -> bool {
+        match self {
+            Node::Leaf(_) => false,
+            Node::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let in_first = first.leaves().contains(&target);
+                if !in_first && !second.leaves().contains(&target) {
+                    return false;
+                }
+                // 内側に同じ向きの分割があれば、そちらを優先
+                let child = if in_first { first } else { second };
+                if child.nudge_inner(target, want, delta) {
+                    return true;
+                }
+                if *axis == want {
+                    *ratio = (*ratio + delta).clamp(Self::MIN_RATIO, Self::MAX_RATIO);
+                    return true;
+                }
+                false
+            }
+        }
+    }
+
     /// `from` から見て `dir` 方向にある隣のペイン
     pub fn neighbor(&self, from: PaneId, dir: Direction) -> Option<PaneId> {
         const EPS: f32 = 1e-4;
@@ -317,6 +380,34 @@ mod tests {
         assert!(!g.remove(1));
         assert_eq!(g.active_pane(), Some(2));
         assert!(g.remove(2));
+    }
+
+    #[test]
+    fn ratio_and_nudge() {
+        // 1 | 2
+        //   | 3
+        let mut root = Node::Leaf(1);
+        root.split(1, 2, Axis::Horizontal);
+        root.split(2, 3, Axis::Vertical);
+        assert!(root.set_ratio_at(&[true], 0.3));
+        assert!(root.set_ratio_at(&[], 0.99));
+        assert!(!root.set_ratio_at(&[false], 0.5));
+        let ratios = |n: &Node| match n {
+            Node::Split { ratio, second, .. } => match &**second {
+                Node::Split { ratio: r2, .. } => (*ratio, *r2),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        assert_eq!(ratios(&root), (Node::MAX_RATIO, 0.3));
+        // 3 から上へ: 内側の上下の分割が動く
+        assert!(root.nudge(3, Direction::Up, 0.1));
+        assert!((ratios(&root).1 - 0.2).abs() < 1e-6);
+        // 3 から左へ: 外側の左右の分割が動く
+        assert!(root.nudge(3, Direction::Left, 0.1));
+        assert!((ratios(&root).0 - (Node::MAX_RATIO - 0.1)).abs() < 1e-6);
+        // 1 には上下の分割がない
+        assert!(!root.nudge(1, Direction::Down, 0.1));
     }
 
     #[test]

@@ -83,12 +83,14 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 |---|---|
 | Ctrl+Shift+N | 新しいワークスペース |
 | Ctrl+Shift+PageDown / PageUp | 次 / 前のワークスペース |
+| Ctrl+1〜8 / Ctrl+9 | 1〜8 番目 / 最後のワークスペース |
 | Ctrl+Shift+R | ワークスペース名の変更（サイドバーのダブルクリック、右クリックメニューでも可） |
 | サイドバーで右クリック | 名前を変更 / 新しいワークスペース / 削除 |
 | Ctrl+Shift+T | フォーカス中の区画に新しいタブ（今のフォルダで開く） |
-| Ctrl+Tab / Ctrl+Shift+Tab | 区画内の次 / 前のタブ |
-| Ctrl+Shift+D / Ctrl+Shift+E | 区画を右に分割 / 下に分割（各区画のタブ行の ◫ ⊟ でも可） |
-| Alt+矢印 | 区画間の移動 |
+| Ctrl+] / Ctrl+[（Ctrl+Tab / Ctrl+Shift+Tab） | 区画内の次 / 前のタブ |
+| Ctrl+D / Ctrl+Shift+D | 区画を右に分割 / 下に分割（Ctrl+Shift+E も下に分割。各区画のタブ行の ◫ ⊟ でも可） |
+| Ctrl+矢印 / Alt+矢印 | 区画間の移動 |
+| Alt+Shift+矢印 | 分割の境界をその方向へ動かす（5% ずつ）。境界の線をマウスでドラッグしても変えられる |
 | Ctrl+Shift+W | タブを閉じる（最後のタブなら区画も閉じる） |
 | Ctrl+Shift+G / `cdi [キーワード]` | フォルダ履歴からターミナル内で選んで移動（fzf を使う。PATH になければインストーラー同梱の fzf.exe、それもなければ内蔵の選択画面） |
 | Ctrl+C | 文字を選択中ならコピー、そうでなければ ^C（中断） |
@@ -104,6 +106,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 | `web [URL / ポート / 検索語]` | シェルから、同じ区画に新しいブラウザのタブを開く（引数なしなら空のタブ。`web 3000` → localhost:3000） |
 
 キー割り当ては `window.rs` の `key_bindings()`。ターミナル（`TerminalView::on_key_down`）より先にキー割り当てが処理される。
+そのため Ctrl+D（EOF）・Ctrl+[（Esc と同じ）・Ctrl+←→（PSReadLine の単語移動）はシェルには届かない。
 
 ## 環境変数
 
@@ -175,7 +178,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] タブバー・分割（左右 / 上下）・Alt+矢印でペイン移動
 - [x] 表示されるまでシェルを起動しない（遅延起動）
 - [x] 文字選択とコピー（ドラッグ、ダブルクリックで単語、トリプルクリックで行）
-- [ ] 分割境界のドラッグでサイズ変更
+- [x] 分割境界のドラッグでサイズ変更（`DraggedDivider`。比率は session.json に保存）・Alt+Shift+矢印
 - [ ] 設定ファイル（`%APPDATA%\wimux\config.toml`: フォント、サイズ、配色、シェル、キー割り当て）
 - [ ] タブのドラッグ並べ替え、ワークスペースの並べ替え
 
