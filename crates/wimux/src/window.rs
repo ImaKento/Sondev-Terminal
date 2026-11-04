@@ -439,7 +439,23 @@ pub struct WimuxWindow {
     ws_menu: Option<(usize, Point<Pixels>)>,
     /// 分割の境界をマウスでドラッグ中（タブのドラッグと区別するため）
     resizing: bool,
+    /// アップデートの状態（サイドバーの下にお知らせを出す）
+    update: UpdateState,
     _subs: Vec<Subscription>,
+}
+
+/// アップデートのお知らせ
+#[derive(Debug, Clone, PartialEq)]
+enum UpdateState {
+    None,
+    /// 新しい版がある
+    Available(crate::update::Release),
+    /// ダウンロード・インストールを始めている
+    Installing(crate::update::Release),
+    /// 更新できなかった（理由）
+    Failed(crate::update::Release, String),
+    /// お知らせを閉じた（この起動の間は出さない）
+    Dismissed,
 }
 
 impl WimuxWindow {
@@ -472,6 +488,7 @@ impl WimuxWindow {
             ws_menu: None,
             resizing: false,
             focus_handle: cx.focus_handle(),
+            update: UpdateState::None,
             _subs: Vec::new(),
         };
 
@@ -586,6 +603,38 @@ impl WimuxWindow {
                         })
                         .is_ok();
                     if !alive {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        // 新しいバージョンの確認（起動の 5 秒後、その後 12 時間ごと）
+        if crate::update::auto_check_enabled() {
+            cx.spawn(async move |this, cx| {
+                let mut wait = Duration::from_secs(5);
+                loop {
+                    cx.background_executor().timer(wait).await;
+                    wait = Duration::from_secs(12 * 3600);
+                    let enabled = this.update(cx, |this, _| this.settings.check_updates);
+                    match enabled {
+                        Err(_) => break,
+                        Ok(false) => continue,
+                        Ok(true) => {}
+                    }
+                    let found = cx
+                        .background_executor()
+                        .spawn(async { crate::update::check() })
+                        .await;
+                    let alive = this.update(cx, |this, cx| {
+                        if let Some(r) = found
+                            && matches!(this.update, UpdateState::None | UpdateState::Available(_))
+                        {
+                            this.update = UpdateState::Available(r);
+                            cx.notify();
+                        }
+                    });
+                    if alive.is_err() {
                         break;
                     }
                 }
@@ -2750,6 +2799,7 @@ impl WimuxWindow {
                     .px(px(8.))
                     .children(items),
             )
+            .children(self.render_update_notice(cx))
             .child(
                 div()
                     .flex()
@@ -2785,6 +2835,157 @@ impl WimuxWindow {
                             .child("設定"),
                     ),
             )
+    }
+
+    // -----------------------------------------------------------------------
+    // アップデート
+    // -----------------------------------------------------------------------
+
+    /// ［更新］: インストーラーをダウンロードして上書きインストールし、このアプリは終了する
+    fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let UpdateState::Available(release) = self.update.clone() else {
+            return;
+        };
+        if !crate::update::CAN_INSTALL || release.installer.is_none() {
+            crate::open::open_url(&release.page);
+            return;
+        }
+        self.update = UpdateState::Installing(release.clone());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = release.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::update::download_and_install(&r) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => {
+                    // インストーラーが上書きできるよう、保存してから終了する
+                    this.closing = true;
+                    this.save_now();
+                    crate::window_state::save(&crate::window_state::SavedWindow::from_bounds(
+                        window.window_bounds(),
+                    ));
+                    cx.quit();
+                }
+                Err(e) => {
+                    log::warn!("アップデートできませんでした: {e}");
+                    this.update = UpdateState::Failed(release, e);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// サイドバーの下のお知らせ「新しいバージョン vX があります ［更新］」
+    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let c = th();
+        let (release, text, button): (_, String, Option<&'static str>) = match &self.update {
+            UpdateState::Available(r) => (
+                r,
+                format!("新しいバージョン v{}", r.version),
+                Some(if crate::update::CAN_INSTALL && r.installer.is_some() {
+                    "更新"
+                } else {
+                    "開く"
+                }),
+            ),
+            UpdateState::Installing(r) => {
+                (r, format!("v{} をダウンロードしています…", r.version), None)
+            }
+            UpdateState::Failed(r, _) => {
+                (r, "更新できませんでした".to_string(), Some("ページを開く"))
+            }
+            UpdateState::None | UpdateState::Dismissed => return None,
+        };
+        let page = release.page.clone();
+        let failed = matches!(self.update, UpdateState::Failed(..));
+        let installing = matches!(self.update, UpdateState::Installing(_));
+        Some(
+            div()
+                .mx(px(8.))
+                .mb(px(4.))
+                .px(px(10.))
+                .py(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .rounded(px(8.))
+                .bg(rgb(c.hover_bg))
+                .border_1()
+                .border_color(rgb(c.accent))
+                .child(
+                    div()
+                        .text_size(px(UI_SMALL))
+                        .text_color(rgb(c.text))
+                        .child(text),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .when_some(button, |el, label| {
+                            el.child(
+                                div()
+                                    .id("update-run")
+                                    .px(px(10.))
+                                    .py(px(3.))
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .bg(rgb(c.accent))
+                                    .text_size(px(UI_SMALL))
+                                    .text_color(rgb(0xffffff))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if failed {
+                                            if let UpdateState::Failed(r, _) = &this.update {
+                                                crate::open::open_url(&r.page);
+                                            }
+                                        } else {
+                                            this.start_update(window, cx);
+                                        }
+                                    }))
+                                    .child(label),
+                            )
+                        })
+                        .when(!page.is_empty() && !failed, |el| {
+                            el.child(
+                                div()
+                                    .id("update-notes")
+                                    .px(px(6.))
+                                    .py(px(3.))
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .text_size(px(UI_SMALL))
+                                    .text_color(rgb(c.text_dim))
+                                    .hover(|s| s.bg(rgb(c.hover_bg_strong)).text_color(rgb(c.text)))
+                                    .on_click(move |_, _, _| crate::open::open_url(&page))
+                                    .child("変更点"),
+                            )
+                        })
+                        .child(div().flex_1())
+                        .when(!installing, |el| {
+                            el.child(
+                                div()
+                                    .id("update-dismiss")
+                                    .flex_none()
+                                    .px(px(4.))
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(c.text_faint))
+                                    .hover(|s| s.bg(rgb(c.hover_bg_strong)).text_color(rgb(c.text)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.update = UpdateState::Dismissed;
+                                        cx.notify();
+                                    }))
+                                    .child("✕"),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -3056,6 +3257,29 @@ impl WimuxWindow {
             }))
             .child(div().size(px(16.)).rounded_full().bg(rgb(0xffffff)));
 
+        let check_updates = self.settings.check_updates;
+        let update_toggle = div()
+            .id("toggle-check-updates")
+            .w(px(38.))
+            .h(px(22.))
+            .p(px(3.))
+            .flex()
+            .flex_none()
+            .rounded_full()
+            .cursor_pointer()
+            .bg(if check_updates {
+                rgb(c.accent)
+            } else {
+                rgb(c.hover_bg_strong)
+            })
+            .when(check_updates, |el| el.justify_end())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings.check_updates = !this.settings.check_updates;
+                settings::save(&this.settings);
+                cx.notify();
+            }))
+            .child(div().size(px(16.)).rounded_full().bg(rgb(0xffffff)));
+
         let row = |label: &'static str, hint: &'static str| {
             div()
                 .flex()
@@ -3220,7 +3444,24 @@ impl WimuxWindow {
                                 "前回 Claude Code を開いていたペインで、そのペインのセッションを再開します（claude --resume）",
                             ))
                             .child(toggle),
-                    ),
+                    )
+                    .child(section("アップデート"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(16.))
+                            .child(row(
+                                "新しいバージョンを確認する",
+                                "起動時に GitHub のリリースを確かめ、新しい版があればサイドバーに［更新］を出します",
+                            ))
+                            .child(update_toggle),
+                    )
+                    .child(hint(concat!(
+                        "今のバージョン: v",
+                        env!("CARGO_PKG_VERSION")
+                    ))),
             );
 
         div()

@@ -19,6 +19,7 @@ mod settings;
 mod terminal;
 mod text_field;
 mod theme;
+mod update;
 mod window;
 mod window_state;
 mod workspace;

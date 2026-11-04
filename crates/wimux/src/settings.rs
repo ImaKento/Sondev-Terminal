@@ -35,6 +35,8 @@ pub struct Settings {
     /// Ctrl+クリックでファイルを開くエディタ（`{file}` `{line}` `{col}` を置き換える）。
     /// 例: `code -g {file}:{line}:{col}`。None なら VS Code → Cursor → 既定のアプリの順に探す
     pub editor: Option<String>,
+    /// 起動時に新しいバージョンがあるか確かめる（GitHub Releases）
+    pub check_updates: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +78,7 @@ impl Default for Settings {
             restore_claude: true,
             browser_cdp: false,
             editor: None,
+            check_updates: true,
         }
     }
 }
