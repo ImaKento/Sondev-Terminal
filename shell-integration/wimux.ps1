@@ -235,12 +235,65 @@ function global:claude {
         Write-Host "claude: Claude Code is not installed"
         return
     }
+    __wimux_agent_started "claude"
     $settings = $env:WIMUX_CLAUDE_SETTINGS
     if ($settings -and (Test-Path -LiteralPath $settings)) {
         & $exe.Source --settings $settings @args
     } else {
         & $exe.Source @args
     }
+}
+
+# ---------------------------------------------------------------------------
+# Other AI agents (codex, gemini, aider ...): tell wimux which agent runs in
+# this pane, so the sidebar shows its state (working / waiting) and wimux
+# notifies when it finishes. Commands the user already defined as a function
+# or alias are left alone.
+# Codex: also hand it wimux's notify program (unless config.toml sets notify),
+# so the "turn finished" notification is exact.
+# ---------------------------------------------------------------------------
+function global:__wimux_agent_started([string]$name) {
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($name))
+    [Console]::Write("$([char]0x1b)]1337;SetUserVar=WIMUX_AGENT=$b64$([char]0x07)")
+}
+
+function global:__wimux_run_agent {
+    $name = $args[0]
+    $rest = @($args | Select-Object -Skip 1)
+    $exe = Get-Command $name -CommandType Application, ExternalScript -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $exe) {
+        Write-Host "${name}: command not found"
+        return
+    }
+    $extra = @()
+    if ($name -eq "codex" -and $env:WIMUX_EXE -and -not $env:WIMUX_EXE.Contains("'")) {
+        $home_dir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
+        $cfg = Join-Path $home_dir "config.toml"
+        $has_notify = (Test-Path -LiteralPath $cfg) -and
+            (Select-String -LiteralPath $cfg -Pattern '^\s*notify\s*=' -Quiet)
+        if (-not $has_notify) {
+            $exe_path = $env:WIMUX_EXE.Replace('\', '/')
+            $extra = @("-c", "notify=['$exe_path','--codex-notify']")
+        }
+    }
+    __wimux_agent_started $name
+    & $exe.Source @extra @rest
+}
+
+foreach ($__wimux_name in @("codex", "gemini", "aider", "opencode", "copilot", "cursor-agent",
+                            "qwen", "amp", "crush", "goose", "kiro-cli")) {
+    if (-not (Get-Command $__wimux_name -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
+        $__wimux_body = [scriptblock]::Create("__wimux_run_agent '$__wimux_name' @args")
+        Set-Item -Path "Function:global:$__wimux_name" -Value $__wimux_body
+    }
+}
+Remove-Variable __wimux_name, __wimux_body -ErrorAction SilentlyContinue
+
+# sondev notify [--title <title>] <message>: show a notification from this pane
+# (e.g. at the end of a long build:  cargo build; sondev notify "build done")
+if ($env:WIMUX_EXE) {
+    function global:sondev { & $env:WIMUX_EXE @args }
 }
 
 # ---------------------------------------------------------------------------

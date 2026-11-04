@@ -44,6 +44,7 @@ gpui_kit::actions!(
         ToggleSidebar,
         OpenSettings,
         OpenBrowser,
+        JumpToAttention,
     ]
 );
 
@@ -78,6 +79,12 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-shift-b", ToggleSidebar, c),
         KeyBinding::new("ctrl-,", OpenSettings, c),
         KeyBinding::new("ctrl-shift-o", OpenBrowser, c),
+        KeyBinding::new("ctrl-shift-u", JumpToAttention, c),
+        KeyBinding::new(
+            "ctrl-shift-f",
+            crate::terminal::view::SearchTerminal,
+            Some(TERMINAL_CONTEXT),
+        ),
         // gpui-kit の Root は Tab / Shift+Tab（フォーカス移動）と Ctrl+C（コピー）を
         // 横取りするので、ターミナル内では無効にしてシェルにそのまま届ける
         KeyBinding::new("tab", NoAction, Some(TERMINAL_CONTEXT)),
@@ -96,53 +103,89 @@ use crate::settings::{self, Settings};
 use crate::terminal::view::installed_fonts;
 use crate::theme::{self, *};
 
-/// Claude Code の状態（ターミナルのタイトルから推定）
+/// AI エージェント（Claude Code・Codex など）の状態。
+/// Claude Code はフック（シェル連携の `claude` 関数から起動したとき）かタイトル、
+/// ほかのエージェントは出力の動き（＋ベル・通知、Codex は notify）から推定する
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeState {
+enum AgentState {
     None,
     /// 応答が終わって待機中
     Idle,
     /// 応答を生成中
     Working,
-    /// 許可・質問への回答を待って止まっている（Claude Code のベル・通知で検知）
+    /// 許可・質問への回答を待って止まっている（フック・ベル・通知で検知）
     Asking,
 }
 
+const CLAUDE: &str = "Claude";
+
+/// シェル連携のラッパー・フックが送ってくるコマンド名 → 表示名
+fn agent_label(name: &str) -> Option<&'static str> {
+    Some(match name.trim().to_ascii_lowercase().as_str() {
+        "claude" => CLAUDE,
+        "codex" => "Codex",
+        "gemini" => "Gemini",
+        "aider" => "Aider",
+        "opencode" => "OpenCode",
+        "copilot" => "Copilot",
+        "cursor-agent" => "Cursor",
+        "qwen" => "Qwen",
+        "amp" => "Amp",
+        "crush" => "Crush",
+        "goose" => "Goose",
+        "kiro-cli" | "kiro" => "Kiro",
+        _ => return None,
+    })
+}
+
+/// 通知・サイドバーに出すエージェント名
+fn agent_title(agent: Option<&'static str>) -> &'static str {
+    match agent {
+        Some(CLAUDE) | None => "Claude Code",
+        Some(a) => a,
+    }
+}
+
+/// 出力が止まってからこれだけ経ったら「待機中」とみなす（出力の動きで推定するエージェント）
+const AGENT_QUIET: Duration = Duration::from_millis(2000);
+/// これより長く動いていたら、止まったときに「完了」を通知する
+const AGENT_MIN_WORK: Duration = Duration::from_secs(4);
+
 /// ペインの状態の色。
 /// 実行中=黄、入力待ち（許可・質問）=赤、完了して未確認=緑、確認済みの待機=灰、その他の通知=青
-fn pane_dot(claude: ClaudeState, attention: bool) -> Option<u32> {
+fn pane_dot(claude: AgentState, attention: bool) -> Option<u32> {
     let c = th();
     match (claude, attention) {
-        (ClaudeState::Asking, _) => Some(c.red),
-        (ClaudeState::Working, _) => Some(c.amber),
-        (ClaudeState::Idle, true) => Some(c.green),
-        (ClaudeState::Idle, false) => Some(c.text_faint),
-        (ClaudeState::None, true) => Some(c.accent),
-        (ClaudeState::None, false) => None,
+        (AgentState::Asking, _) => Some(c.red),
+        (AgentState::Working, _) => Some(c.amber),
+        (AgentState::Idle, true) => Some(c.green),
+        (AgentState::Idle, false) => Some(c.text_faint),
+        (AgentState::None, true) => Some(c.accent),
+        (AgentState::None, false) => None,
     }
 }
 
 /// 複数ペインのうち、いちばん目を引くべき状態（ワークスペースの丸に使う）
-fn dot_priority(claude: ClaudeState, attention: bool) -> u8 {
+fn dot_priority(claude: AgentState, attention: bool) -> u8 {
     match (claude, attention) {
-        (ClaudeState::Asking, _) => 5,
-        (ClaudeState::Idle, true) => 4,
-        (ClaudeState::None, true) => 3,
-        (ClaudeState::Working, _) => 2,
-        (ClaudeState::Idle, false) => 1,
-        (ClaudeState::None, false) => 0,
+        (AgentState::Asking, _) => 5,
+        (AgentState::Idle, true) => 4,
+        (AgentState::None, true) => 3,
+        (AgentState::Working, _) => 2,
+        (AgentState::Idle, false) => 1,
+        (AgentState::None, false) => 0,
     }
 }
 
 /// Claude Code はタイトルを「✳ Claude Code」（待機中）や、先頭がスピナー文字（作業中）にする
-fn claude_state_from_title(title: &str) -> Option<ClaudeState> {
+fn claude_state_from_title(title: &str) -> Option<AgentState> {
     let first = title.chars().next()?;
     let is_spinner = ('\u{2800}'..='\u{28FF}').contains(&first) || "·✢✻✽✶*".contains(first);
     if title.contains("Claude") || first == '✳' {
         Some(if is_spinner {
-            ClaudeState::Working
+            AgentState::Working
         } else {
-            ClaudeState::Idle
+            AgentState::Idle
         })
     } else {
         None
@@ -226,7 +269,15 @@ struct Pane {
     cwd: Option<String>,
     conda: Option<String>,
     title: Option<String>,
-    claude: ClaudeState,
+    state: AgentState,
+    /// 動いているエージェントの表示名（"Claude" / "Codex" など）
+    agent: Option<&'static str>,
+    /// 状態をフックから受け取っている（Claude Code）。タイトル・ベルからの推定は控えめにする
+    hooked: bool,
+    /// 状態を出力の動きから推定する（フックのないエージェント）
+    activity_driven: bool,
+    working_since: Option<Instant>,
+    asking_since: Option<Instant>,
     /// 前回のセッションから引き継いだ Claude Code のセッション ID（このペインでまだ再開していない場合に使う）
     claude_session: Option<String>,
     /// git のブランチ名（cwd から .git/HEAD を読む）
@@ -270,7 +321,12 @@ impl Pane {
             cwd,
             conda: None,
             title: None,
-            claude: ClaudeState::None,
+            state: AgentState::None,
+            agent: None,
+            hooked: false,
+            activity_driven: false,
+            working_since: None,
+            asking_since: None,
             claude_session: None,
             branch: None,
             attention: false,
@@ -444,6 +500,43 @@ impl WimuxWindow {
             })
             .detach();
         }
+
+        // フック・`sondev notify` からの知らせ
+        if let Some(rx) = crate::ipc::receiver() {
+            cx.spawn_in(window, async move |this, cx| {
+                while let Ok(first) = rx.recv_async().await {
+                    let mut msgs = vec![first];
+                    msgs.extend(rx.try_iter());
+                    let alive = this
+                        .update_in(cx, |this, window, cx| {
+                            for msg in msgs {
+                                this.on_ipc(msg, window, cx);
+                            }
+                            cx.notify();
+                        })
+                        .is_ok();
+                    if !alive {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        // フックのないエージェントの状態を、出力の動きから推定する
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                if this
+                    .update_in(cx, |this, window, cx| this.tick_agents(window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
 
         this.focus_active(window, cx);
         this
@@ -1151,7 +1244,9 @@ impl WimuxWindow {
                         this.navigate(id, &url, cx);
                         this.focus_handle.focus(window, cx);
                     }
-                    TextFieldEvent::Submit(_) => {}
+                    TextFieldEvent::Submit(_)
+                    | TextFieldEvent::SubmitBack
+                    | TextFieldEvent::Changed => {}
                     TextFieldEvent::Cancel => {
                         let url = this
                             .panes
@@ -1446,14 +1541,36 @@ impl WimuxWindow {
                     return;
                 };
                 pane.title = Some(title.clone());
-                let new_state = claude_state_from_title(title).unwrap_or(ClaudeState::None);
-                // 許可待ちで止まっている間は、タイトルが待機中になっても「入力待ち」のまま
-                if pane.claude == ClaudeState::Asking && new_state == ClaudeState::Idle {
+                let Some(new_state) = claude_state_from_title(title) else {
+                    // Claude のタイトルでなくなった = タイトルで見ていた Claude は終わった
+                    if pane.agent == Some(CLAUDE) && !pane.hooked && !pane.activity_driven {
+                        pane.agent = None;
+                        pane.state = AgentState::None;
+                    }
+                    cx.notify();
+                    return;
+                };
+                pane.agent = Some(CLAUDE);
+                pane.activity_driven = false;
+                if pane.hooked {
+                    // 状態はフックで分かる。フックが届かなかったときのために「作業中」だけは拾う
+                    if new_state == AgentState::Working
+                        && matches!(pane.state, AgentState::Idle | AgentState::None)
+                    {
+                        pane.state = AgentState::Working;
+                        pane.working_since = Some(Instant::now());
+                    } else if pane.state == AgentState::None {
+                        pane.state = new_state;
+                    }
+                    cx.notify();
                     return;
                 }
-                let finished =
-                    pane.claude == ClaudeState::Working && new_state == ClaudeState::Idle;
-                pane.claude = new_state;
+                // 許可待ちで止まっている間は、タイトルが待機中になっても「入力待ち」のまま
+                if pane.state == AgentState::Asking && new_state == AgentState::Idle {
+                    return;
+                }
+                let finished = pane.state == AgentState::Working && new_state == AgentState::Idle;
+                pane.state = new_state;
                 if finished {
                     // 許可の確認で止まったときもタイトルは待機中になる。直後にベルが来たら
                     // 「入力待ち」なので、少し待ってから「完了」を通知する
@@ -1465,7 +1582,7 @@ impl WimuxWindow {
                             if this
                                 .panes
                                 .get(&id)
-                                .is_some_and(|p| p.claude == ClaudeState::Idle)
+                                .is_some_and(|p| p.state == AgentState::Idle && !p.hooked)
                             {
                                 this.notify_pane(id, "Claude Code", "応答が終わりました", window);
                                 cx.notify();
@@ -1480,7 +1597,10 @@ impl WimuxWindow {
                     return;
                 };
                 // プロンプトが出た = Claude Code などのアプリは終了している
-                pane.claude = ClaudeState::None;
+                pane.state = AgentState::None;
+                pane.agent = None;
+                pane.hooked = false;
+                pane.activity_driven = false;
                 // git checkout でブランチが変わることもあるので、プロンプトのたびに読み直す
                 pane.branch = git_branch(cwd);
                 if pane.cwd.as_deref() != Some(cwd.as_str()) || !pane.prompted {
@@ -1500,6 +1620,18 @@ impl WimuxWindow {
                         }
                     }
                 }
+                // シェル連携のラッパー（codex・gemini など）がエージェントを起動する直前に送る
+                "WIMUX_AGENT" => {
+                    if let (Some(label), Some(pane)) = (agent_label(value), self.panes.get_mut(&id))
+                    {
+                        pane.agent = Some(label);
+                        // Claude はフック・タイトルで分かる。ほかは出力の動きで推定する
+                        pane.activity_driven = label != CLAUDE;
+                        if pane.state == AgentState::None {
+                            pane.state = AgentState::Idle;
+                        }
+                    }
+                }
                 // シェル連携スクリプトのコマンド（web）から呼ばれる
                 "WIMUX_CMD" => {
                     let mut parts = value.splitn(2, ' ');
@@ -1514,12 +1646,12 @@ impl WimuxWindow {
                 _ => {}
             },
             TerminalEvent::Shell(ShellEvent::Notify { title, body }) => {
-                let claude_active = self
+                let (agent_active, hooked) = self
                     .panes
                     .get(&id)
-                    .is_some_and(|p| p.claude != ClaudeState::None);
-                // Claude Code の「許可が必要」などの通知 → 入力待ち
-                if claude_active && !body.contains("waiting for your input") {
+                    .map_or((false, false), |p| (p.state != AgentState::None, p.hooked));
+                // エージェントの「許可が必要」などの通知 → 入力待ち（フックがあればフックに任せる）
+                if agent_active && !hooked && !body.contains("waiting for your input") {
                     self.claude_asking(id, body, window);
                 } else {
                     let title = title.clone().unwrap_or_else(|| "通知".into());
@@ -1531,10 +1663,20 @@ impl WimuxWindow {
                 if self
                     .panes
                     .get(&id)
-                    .is_some_and(|p| p.claude != ClaudeState::None)
+                    .is_some_and(|p| p.state != AgentState::None && !p.hooked)
                 {
                     self.claude_asking(id, "許可・回答を待っています", window);
                 }
+            }
+            TerminalEvent::OpenUrl { url, in_app } => {
+                if *in_app && browser::SUPPORTED {
+                    self.open_web_from(id, url.clone(), window, cx);
+                } else {
+                    crate::open::open_url(url);
+                }
+            }
+            TerminalEvent::OpenPath { path, line, col } => {
+                crate::open::open_path(path, *line, *col, self.settings.editor.as_deref());
             }
             TerminalEvent::Exited => {
                 if !self.closing {
@@ -1563,13 +1705,207 @@ impl WimuxWindow {
         let Some(pane) = self.panes.get_mut(&id) else {
             return;
         };
-        let was_asking = pane.claude == ClaudeState::Asking;
-        pane.claude = ClaudeState::Asking;
+        let was_asking = pane.state == AgentState::Asking;
+        pane.state = AgentState::Asking;
         if !was_asking {
+            pane.asking_since = Some(Instant::now());
             // 直前の「完了」通知と重なっても、こちらは必ず知らせる
             pane.last_notified = None;
-            self.notify_pane(id, "Claude Code（入力待ち）", body, window);
+            let title = format!("{}（入力待ち）", agent_title(pane.agent));
+            self.notify_pane(id, &title, body, window);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // エージェントの状態（フック・出力の動き）と入力待ちへの移動
+    // -----------------------------------------------------------------------
+
+    /// ペインの中のフック・`sondev notify` から届いた知らせ
+    fn on_ipc(&mut self, msg: crate::ipc::Incoming, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ipc::{AgentEvent, Message};
+        // WIMUX_PANE_ID は「<プロセス ID>-<ペイン番号>」。別に起動した wimux のものは無視する
+        let Some(id) = msg
+            .pane
+            .split_once('-')
+            .filter(|(pid, _)| *pid == std::process::id().to_string())
+            .and_then(|(_, id)| id.parse::<PaneId>().ok())
+            .filter(|id| self.panes.contains_key(id))
+        else {
+            return;
+        };
+        match msg.message {
+            Message::Notify { title, body } => {
+                let title = title.unwrap_or_else(|| "通知".into());
+                self.notify_pane(id, &title, &body, window);
+            }
+            Message::Agent {
+                agent,
+                event,
+                message,
+            } => {
+                let label = agent_label(&agent).unwrap_or("Agent");
+                let Some(pane) = self.panes.get_mut(&id) else {
+                    return;
+                };
+                pane.agent = Some(label);
+                // Claude Code はフックで状態がすべて分かる。Codex の notify は「完了」だけ
+                if label == CLAUDE {
+                    pane.hooked = true;
+                    pane.activity_driven = false;
+                }
+                match event {
+                    AgentEvent::Start => {
+                        if pane.state == AgentState::None {
+                            pane.state = AgentState::Idle;
+                        }
+                    }
+                    AgentEvent::Working => {
+                        if pane.state != AgentState::Working {
+                            pane.working_since = Some(Instant::now());
+                        }
+                        pane.state = AgentState::Working;
+                    }
+                    AgentEvent::Asking => {
+                        let body = message.unwrap_or_else(|| "許可・回答を待っています".into());
+                        self.claude_asking(id, &body, window);
+                    }
+                    AgentEvent::Done => {
+                        pane.state = AgentState::Idle;
+                        let title = agent_title(pane.agent);
+                        let body = message.unwrap_or_else(|| "応答が終わりました".into());
+                        self.notify_pane(id, title, &body, window);
+                    }
+                    AgentEvent::IdleReminder => {}
+                    AgentEvent::End => {
+                        pane.state = AgentState::None;
+                        pane.agent = None;
+                        pane.hooked = false;
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 0.5 秒ごと: 入力待ちに答えたか、フックのないエージェントが動いているかを見る
+    fn tick_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let quiet = |t: Option<Instant>, d: Duration| t.is_none_or(|t| now.duration_since(t) >= d);
+        let mut changed = false;
+        let mut finished = Vec::new();
+        for (id, pane) in self.panes.iter_mut() {
+            if pane.agent.is_none() {
+                continue;
+            }
+            let Some(view) = &pane.view else {
+                continue;
+            };
+            let a = view.read(cx).activity();
+            // 入力待ちのあとにキーを押した = 答えた → 作業中に戻す
+            if pane.state == AgentState::Asking
+                && let (Some(input), Some(asked)) = (a.last_input, pane.asking_since)
+                && input > asked
+            {
+                pane.state = AgentState::Working;
+                pane.working_since = Some(now);
+                changed = true;
+                continue;
+            }
+            if !pane.activity_driven || pane.hooked {
+                continue;
+            }
+            // 自分で打った文字の表示や、リサイズの再描画は「動いている」に数えない
+            let busy = !quiet(a.last_output, AGENT_QUIET)
+                && quiet(a.last_input, AGENT_QUIET)
+                && quiet(a.last_resize, Duration::from_secs(1));
+            match pane.state {
+                AgentState::Idle | AgentState::None if busy => {
+                    pane.state = AgentState::Working;
+                    pane.working_since = Some(now);
+                    changed = true;
+                }
+                AgentState::Working if quiet(a.last_output, AGENT_QUIET) => {
+                    pane.state = AgentState::Idle;
+                    changed = true;
+                    if pane
+                        .working_since
+                        .is_some_and(|t| now.duration_since(t) >= AGENT_MIN_WORK)
+                    {
+                        finished.push((*id, agent_title(pane.agent)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (id, title) in finished {
+            self.notify_pane(id, title, "応答が終わりました", window);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Ctrl+Shift+U: 入力待ち（許可・質問）→ 完了して未確認 → そのほかの通知 の順に、次のペインへ移動
+    fn jump_to_attention(
+        &mut self,
+        _: &JumpToAttention,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let order: Vec<PaneId> = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| self.ws_panes(ws))
+            .collect();
+        let current = self.focused_pane();
+        let score = |id: &PaneId| {
+            self.panes
+                .get(id)
+                .map_or(0, |p| match (p.state, p.attention) {
+                    (AgentState::Asking, _) => 3,
+                    (AgentState::Idle, true) => 2,
+                    (_, true) => 1,
+                    _ => 0,
+                })
+        };
+        let best = order
+            .iter()
+            .filter(|id| Some(**id) != current)
+            .map(score)
+            .max()
+            .unwrap_or(0);
+        if best == 0 {
+            return;
+        }
+        // 今のペインの次から順に探す（何度も押すと同じ種類のペインを巡回する）
+        let start = current
+            .and_then(|c| order.iter().position(|id| *id == c))
+            .map_or(0, |i| i + 1);
+        let n = order.len();
+        let Some(target) = (0..n)
+            .map(|k| order[(start + k) % n])
+            .find(|id| Some(*id) != current && score(id) == best)
+        else {
+            return;
+        };
+        self.reveal_pane(target, window, cx);
+    }
+
+    /// ペインのあるワークスペース・区画・タブを表示してフォーカスする
+    fn reveal_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((wi, gid, ti)) = self.locate(id) else {
+            return;
+        };
+        self.active = wi;
+        if let Some(ws) = self.workspaces.get_mut(wi) {
+            ws.unread = 0;
+            ws.focused = gid;
+        }
+        if let Some(group) = self.groups.get_mut(&gid) {
+            group.active = ti;
+        }
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
     }
 
     /// 通知: 見えていないワークスペースなら未読を増やし、ウィンドウが裏ならトーストも出す
@@ -1666,10 +2002,10 @@ impl WimuxWindow {
         PaneState {
             cwd: pane.and_then(|p| p.cwd.clone()),
             conda: pane.and_then(|p| p.conda.clone()),
-            claude: pane.is_some_and(|p| p.claude != ClaudeState::None),
+            claude: pane.is_some_and(|p| p.agent == Some(CLAUDE) && p.state != AgentState::None),
             // フックが記録した今のセッション。まだ無ければ前回から引き継いだもの
             claude_session: pane
-                .filter(|p| p.claude != ClaudeState::None)
+                .filter(|p| p.agent == Some(CLAUDE) && p.state != AgentState::None)
                 .and_then(|p| {
                     crate::claude_session::read(&crate::claude_session::pane_key(id))
                         .or_else(|| p.claude_session.clone())
@@ -1772,10 +2108,11 @@ impl WimuxWindow {
         }
         // 起動前でも状態を保持しておく（開かずに終了しても失われないように）
         pane.conda = p.conda;
-        pane.claude = if p.claude {
-            ClaudeState::Idle
+        pane.agent = p.claude.then_some(CLAUDE);
+        pane.state = if p.claude {
+            AgentState::Idle
         } else {
-            ClaudeState::None
+            AgentState::None
         };
         id
     }
@@ -1836,18 +2173,19 @@ impl WimuxWindow {
             .unwrap_or_else(|| format!("ワークスペース {}", index + 1))
     }
 
-    fn workspace_claude(&self, ws: &Workspace) -> ClaudeState {
-        let states: Vec<ClaudeState> = self
+    /// ワークスペースのエージェントの状態（いちばん目を引くもの）と、その表示名
+    fn workspace_agent(&self, ws: &Workspace) -> (AgentState, &'static str) {
+        let panes: Vec<&Pane> = self
             .ws_panes(ws)
             .iter()
-            .filter_map(|id| self.panes.get(id).map(|p| p.claude))
+            .filter_map(|id| self.panes.get(id))
             .collect();
-        for s in [ClaudeState::Asking, ClaudeState::Working, ClaudeState::Idle] {
-            if states.contains(&s) {
-                return s;
+        for s in [AgentState::Asking, AgentState::Working, AgentState::Idle] {
+            if let Some(p) = panes.iter().find(|p| p.state == s) {
+                return (s, p.agent.unwrap_or(CLAUDE));
             }
         }
-        ClaudeState::None
+        (AgentState::None, CLAUDE)
     }
 
     /// ワークスペースの丸の色（中のペインでいちばん目を引くべき状態）
@@ -1859,11 +2197,11 @@ impl WimuxWindow {
             .map(|p| {
                 // 表示中のワークスペースでは、見えているペインの「未確認」は数えない
                 let attention = p.attention && !selected;
-                (dot_priority(p.claude, attention), p.claude, attention)
+                (dot_priority(p.state, attention), p.state, attention)
             })
             .max_by_key(|(prio, _, _)| *prio)?;
         let (_, claude, attention) = best;
-        let attention = attention || (ws.unread > 0 && claude == ClaudeState::None);
+        let attention = attention || (ws.unread > 0 && claude == AgentState::None);
         pane_dot(claude, attention)
     }
 
@@ -1884,7 +2222,7 @@ impl WimuxWindow {
             let cwd = focused.and_then(|p| p.cwd.as_deref()).map(short_path);
             let branch = focused.and_then(|p| p.branch.clone());
             let conda = focused.and_then(|p| p.conda.clone());
-            let claude = self.workspace_claude(ws);
+            let (claude, agent) = self.workspace_agent(ws);
             let unread = ws.unread;
             let note = ws.last_notification.clone();
             let dot = self.workspace_dot(ws, selected);
@@ -1913,16 +2251,16 @@ impl WimuxWindow {
                 ));
             }
             match claude {
-                ClaudeState::Asking => line3.push((
-                    "Claude 入力待ち".into(),
+                AgentState::Asking => line3.push((
+                    format!("{agent} 入力待ち"),
                     if selected { 0xffffff } else { th().red },
                 )),
-                ClaudeState::Working => line3.push((
-                    "Claude 実行中".into(),
+                AgentState::Working => line3.push((
+                    format!("{agent} 実行中"),
                     if selected { 0xffffff } else { th().amber },
                 )),
-                ClaudeState::Idle => line3.push(("Claude 待機中".into(), meta)),
-                ClaudeState::None => {}
+                AgentState::Idle => line3.push((format!("{agent} 待機中"), meta)),
+                AgentState::None => {}
             }
             let n_tabs = self.ws_panes(ws).len();
             if n_tabs > 1 {
@@ -2615,7 +2953,7 @@ impl WimuxWindow {
                     .and_then(|p| p.cwd.as_deref().and_then(folder_name))
                     .unwrap_or_else(|| format!("タブ {}", i + 1)),
             };
-            let claude = pane.map_or(ClaudeState::None, |p| p.claude);
+            let claude = pane.map_or(AgentState::None, |p| p.state);
             let attention = pane.is_some_and(|p| p.attention);
             let dot = pane_dot(claude, attention);
             let id = *id;
@@ -2958,7 +3296,7 @@ impl WimuxWindow {
                 // 見ていない間に何かあった区画は、状態の色の枠で囲む
                 let attention = pane
                     .filter(|p| p.attention)
-                    .and_then(|p| pane_dot(p.claude, true));
+                    .and_then(|p| pane_dot(p.state, true));
                 let browser_el = match (pane_id, pane) {
                     (Some(id), Some(p)) if p.is_browser() => Some(self.render_browser(id)),
                     _ => None,
@@ -3082,6 +3420,7 @@ impl Render for WimuxWindow {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_browser))
+            .on_action(cx.listener(Self::jump_to_attention))
             .relative()
             .flex()
             .flex_row()
@@ -3212,17 +3551,17 @@ fn restore_claude_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaudeState, claude_state_from_title, folder_name};
+    use super::{AgentState, claude_state_from_title, folder_name};
 
     #[test]
     fn claude_title_detection() {
         assert_eq!(
             claude_state_from_title("✳ Claude Code"),
-            Some(ClaudeState::Idle)
+            Some(AgentState::Idle)
         );
         assert_eq!(
             claude_state_from_title("⠂ Claude Code"),
-            Some(ClaudeState::Working)
+            Some(AgentState::Working)
         );
         assert_eq!(
             claude_state_from_title("C:\\Users\\kento - PowerShell"),

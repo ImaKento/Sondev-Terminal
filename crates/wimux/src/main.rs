@@ -9,7 +9,10 @@ pub const APP_NAME: &str = "Sondev Terminal";
 mod browser;
 mod claude_session;
 mod dirs;
+mod hooks;
+mod ipc;
 mod notify;
+mod open;
 mod picker;
 mod session;
 mod settings;
@@ -23,12 +26,20 @@ mod workspace;
 use gpui_kit::*;
 
 fn main() {
-    // Claude Code のフックとして呼ばれたとき（ウィンドウは開かない）
-    if std::env::args().nth(1).as_deref() == Some("--claude-hook") {
-        claude_session::run_hook();
-        return;
+    // ペインの中から呼ばれたとき（ウィンドウは開かない）
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        // Claude Code のフック
+        Some("--claude-hook") => return claude_session::run_hook(),
+        // Codex CLI の notify（最後の引数が JSON）
+        Some("--codex-notify") => return hooks::run_codex_notify(&args[1..]),
+        // `sondev notify [--title <題>] <本文>`
+        Some("notify") => return hooks::run_notify(&args[1..]),
+        _ => {}
     }
     env_logger::init();
+    // フック・通知の受け口（ペインの環境変数 WIMUX_IPC で場所を渡す）
+    ipc::start();
     claude_session::cleanup();
     let s = settings::load();
     browser::init(s.browser_cdp.then_some(settings::CDP_PORT));

@@ -7,21 +7,34 @@
 
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
+use alacritty_terminal::index::{
+    Column, Direction as GridDirection, Line, Point as GridPoint, Side,
+};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::colors::{resolve, to_hsla};
+use super::links::{self, Link};
 use super::osc::ShellEvent;
 use super::{TermMsg, TermSize, Terminal, keys};
+use crate::text_field::{TextField, TextFieldEvent};
+
+gpui_kit::actions!(terminal, [SearchTerminal]);
+
+/// 検索で拾うマッチの上限（スクロールバック全体を数えるので、多すぎるときは打ち切る）
+const MAX_MATCHES: usize = 5000;
+/// 出力が続いている間の再検索の間隔
+const SEARCH_REFRESH: Duration = Duration::from_millis(150);
 
 /// 親（ウィンドウ）へ通知するイベント。
 #[derive(Debug, Clone)]
@@ -32,6 +45,59 @@ pub enum TerminalEvent {
     Exited,
     /// このペインにフォーカスが移った
     Focused,
+    /// Ctrl+クリックした URL（Ctrl+Shift+クリックなら in_app: アプリ内のブラウザで開く）
+    OpenUrl {
+        url: String,
+        in_app: bool,
+    },
+    /// Ctrl+クリックしたファイル・フォルダ（実在を確かめた絶対パス）
+    OpenPath {
+        path: PathBuf,
+        line: Option<u32>,
+        col: Option<u32>,
+    },
+}
+
+/// 開く先（実在を確かめたもの）
+#[derive(Debug, Clone, PartialEq)]
+enum LinkTarget {
+    Url(String),
+    Path {
+        path: PathBuf,
+        line: Option<u32>,
+        col: Option<u32>,
+    },
+}
+
+/// Ctrl を押しながらマウスを乗せているリンク（下線を引く）
+#[derive(Debug, Clone, PartialEq)]
+struct HoverLink {
+    /// 下線を引くセルの範囲（グリッドの行, 開始列, 終了列（含まない））
+    segments: Vec<(Line, usize, usize)>,
+    target: LinkTarget,
+}
+
+/// スクロールバック検索（Ctrl+Shift+F）
+struct SearchState {
+    field: Entity<TextField>,
+    _sub: Subscription,
+    query: String,
+    regex: Option<RegexSearch>,
+    matches: Vec<Match>,
+    /// 選んでいるマッチ（Enter で上へ、Shift+Enter で下へ）
+    current: Option<usize>,
+    /// 検索したときの内容の版（出力が増えたら検索し直す）
+    searched_version: u64,
+    last_run: Option<Instant>,
+    refresh: Option<Task<()>>,
+}
+
+/// エージェントの動きを推定するための時刻（window.rs が見る）
+#[derive(Debug, Clone, Copy)]
+pub struct Activity {
+    pub last_output: Option<Instant>,
+    pub last_input: Option<Instant>,
+    pub last_resize: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +125,14 @@ pub struct TerminalView {
     pending_commands: VecDeque<String>,
     /// Claude Code が動いているらしい（タイトルで判定。プロンプトが出たら解除）
     claude_ui: bool,
+    /// シェルの今のフォルダ（相対パスのリンクを解決するのに使う）
+    cwd: Option<String>,
+    search: Option<SearchState>,
+    /// 画面の内容の版（出力が来るたびに増える）
+    content_version: u64,
+    hover_link: Option<HoverLink>,
+    last_output: Option<Instant>,
+    last_input: Option<Instant>,
     _io_task: Task<()>,
     _focus_sub: Subscription,
 }
@@ -115,6 +189,12 @@ impl TerminalView {
             exited: false,
             pending_commands: VecDeque::new(),
             claude_ui: false,
+            cwd: None,
+            search: None,
+            content_version: 0,
+            hover_link: None,
+            last_output: None,
+            last_input: None,
             _io_task: io_task,
             _focus_sub: focus_sub,
         }
@@ -140,9 +220,21 @@ impl TerminalView {
         self.write(text.as_bytes());
     }
 
+    /// 出力・入力・リサイズの最後の時刻
+    pub fn activity(&self) -> Activity {
+        Activity {
+            last_output: self.last_output,
+            last_input: self.last_input,
+            last_resize: self.terminal.shared.resized_at(),
+        }
+    }
+
     fn handle_msg(&mut self, msg: TermMsg, cx: &mut Context<Self>) {
         match msg {
-            TermMsg::Wakeup => {}
+            TermMsg::Wakeup => {
+                self.content_version = self.content_version.wrapping_add(1);
+                self.last_output = Some(Instant::now());
+            }
             TermMsg::Title(t) => {
                 let first = t.chars().next().unwrap_or(' ');
                 self.claude_ui = t.contains("Claude")
@@ -152,8 +244,9 @@ impl TerminalView {
             }
             TermMsg::Bell => cx.emit(TerminalEvent::Bell),
             TermMsg::Shell(ev) => {
-                if matches!(ev, ShellEvent::Cwd(_)) {
+                if let ShellEvent::Cwd(cwd) = &ev {
                     self.claude_ui = false;
+                    self.cwd = Some(cwd.clone());
                 }
                 // cwd の通知 = プロンプトが表示された合図。積んであるコマンドを 1 つ流す
                 if matches!(ev, ShellEvent::Cwd(_))
@@ -179,6 +272,7 @@ impl TerminalView {
         if self.exited {
             return;
         }
+        self.last_input = Some(Instant::now());
         {
             let mut term = self.terminal.shared.term.lock();
             if term.grid().display_offset() != 0 {
@@ -258,7 +352,18 @@ impl TerminalView {
         Some((GridPoint::new(Line(row - offset), Column(col)), side))
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // 検索欄から上がってきたキー（ターミナルには送らない）
+        if !self.focus_handle.is_focused(window) {
+            match ev.keystroke.key.as_str() {
+                "up" => self.search_step(true, cx),
+                "down" => self.search_step(false, cx),
+                "f3" => self.search_step(!ev.keystroke.modifiers.shift, cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
         // IME 変換中のキーは IME に任せる
         if self.marked_text.is_some() {
             return;
@@ -374,6 +479,13 @@ impl TerminalView {
 
     fn on_left_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        // Ctrl+クリック: URL・ファイルを開く
+        if ev.modifiers.control
+            && let Some(link) = self.link_at(ev.position)
+        {
+            self.open_link(link.target, ev.modifiers.shift, cx);
+            return;
+        }
         let Some((point, side)) = self.grid_point(ev.position) else {
             return;
         };
@@ -389,6 +501,7 @@ impl TerminalView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.selecting || ev.pressed_button != Some(MouseButton::Left) {
+            self.update_hover(ev.position, ev.modifiers.control, cx);
             return;
         }
         if let Some((point, side)) = self.grid_point(ev.position) {
@@ -409,6 +522,372 @@ impl TerminalView {
             term.selection = None;
         }
         cx.notify();
+    }
+
+    fn on_modifiers_changed(
+        &mut self,
+        ev: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_hover(window.mouse_position(), ev.modifiers.control, cx);
+    }
+
+    // -----------------------------------------------------------------------
+    // リンク（Ctrl+クリック）
+    // -----------------------------------------------------------------------
+
+    /// Ctrl を押している間、マウスの下のリンクに下線を引く
+    fn update_hover(&mut self, pos: Point<Pixels>, ctrl: bool, cx: &mut Context<Self>) {
+        let inside = self.content_bounds.get().is_some_and(|b| b.contains(&pos));
+        let hover = if ctrl && inside {
+            self.link_at(pos)
+        } else {
+            None
+        };
+        if hover != self.hover_link {
+            self.hover_link = hover;
+            cx.notify();
+        }
+    }
+
+    /// マウス位置のリンク（OSC 8 のハイパーリンク、または文字列から見つけた URL・実在するパス）
+    fn link_at(&self, pos: Point<Pixels>) -> Option<HoverLink> {
+        let (point, _) = self.grid_point(pos)?;
+        let (chars, cells, at) = {
+            let term = self.terminal.shared.term.lock();
+            let grid = term.grid();
+            let cols = term.columns();
+
+            // OSC 8（アプリが埋め込んだリンク）
+            if let Some(h) = grid[point].hyperlink() {
+                let row = &grid[point.line];
+                let same = |c: usize| row[Column(c)].hyperlink().as_ref() == Some(&h);
+                let mut s = point.column.0;
+                while s > 0 && same(s - 1) {
+                    s -= 1;
+                }
+                let mut e = point.column.0 + 1;
+                while e < cols && same(e) {
+                    e += 1;
+                }
+                let uri = h.uri().to_string();
+                let target = match super::osc::parse_file_url(&uri) {
+                    Some(path) => LinkTarget::Path {
+                        path: links::resolve(&path, self.cwd.as_deref())?,
+                        line: None,
+                        col: None,
+                    },
+                    None => LinkTarget::Url(uri),
+                };
+                return Some(HoverLink {
+                    segments: vec![(point.line, s, e)],
+                    target,
+                });
+            }
+
+            // 折り返された行はつなげて 1 行として見る（長い URL・パス）
+            let wrapped = |l: Line| grid[l][Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+            let mut first = point.line;
+            while first > term.topmost_line()
+                && point.line.0 - first.0 < 20
+                && wrapped(Line(first.0 - 1))
+            {
+                first = Line(first.0 - 1);
+            }
+            let mut last = point.line;
+            while last < term.bottommost_line() && last.0 - point.line.0 < 20 && wrapped(last) {
+                last = Line(last.0 + 1);
+            }
+            let mut chars = Vec::new();
+            let mut cells: Vec<(Line, usize, usize)> = Vec::new();
+            let mut at = None;
+            for l in first.0..=last.0 {
+                let line = Line(l);
+                for c in 0..cols {
+                    let cell = &grid[line][Column(c)];
+                    let here = line == point.line && c == point.column.0;
+                    if cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        if here {
+                            at = chars.len().checked_sub(1);
+                        }
+                        continue;
+                    }
+                    if here {
+                        at = Some(chars.len());
+                    }
+                    let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+                        2
+                    } else {
+                        1
+                    };
+                    chars.push(cell.c);
+                    cells.push((line, c, width));
+                }
+            }
+            (chars, cells, at?)
+        };
+        let (range, link) = links::find_at(&chars, at)?;
+        let target = match link {
+            Link::Url(url) => LinkTarget::Url(url),
+            Link::Path { path, line, col } => LinkTarget::Path {
+                path: links::resolve(&path, self.cwd.as_deref())?,
+                line,
+                col,
+            },
+        };
+        // 行ごとの下線の範囲
+        let mut segments: Vec<(Line, usize, usize)> = Vec::new();
+        for &(line, col, width) in &cells[range] {
+            match segments.last_mut() {
+                Some(seg) if seg.0 == line => seg.2 = col + width,
+                _ => segments.push((line, col, col + width)),
+            }
+        }
+        Some(HoverLink { segments, target })
+    }
+
+    fn open_link(&mut self, target: LinkTarget, shift: bool, cx: &mut Context<Self>) {
+        self.hover_link = None;
+        match target {
+            LinkTarget::Url(url) => cx.emit(TerminalEvent::OpenUrl { url, in_app: shift }),
+            LinkTarget::Path { path, line, col } => {
+                cx.emit(TerminalEvent::OpenPath { path, line, col })
+            }
+        }
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------------
+    // スクロールバック検索
+    // -----------------------------------------------------------------------
+
+    fn open_search(&mut self, _: &SearchTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            let field = cx.new(|cx| TextField::new("スクロールバックを検索", cx));
+            let sub = cx.subscribe_in(
+                &field,
+                window,
+                |this, _, ev: &TextFieldEvent, window, cx| match ev {
+                    TextFieldEvent::Changed => this.update_query(cx),
+                    TextFieldEvent::Submit(_) => this.search_step(true, cx),
+                    TextFieldEvent::SubmitBack => this.search_step(false, cx),
+                    TextFieldEvent::Cancel => this.close_search(window, cx),
+                },
+            );
+            self.search = Some(SearchState {
+                field,
+                _sub: sub,
+                query: String::new(),
+                regex: None,
+                matches: Vec::new(),
+                current: None,
+                searched_version: 0,
+                last_run: None,
+                refresh: None,
+            });
+        }
+        // 1 行だけ選択していれば、それを検索語にする
+        let selected = self
+            .terminal
+            .shared
+            .term
+            .lock()
+            .selection_to_string()
+            .filter(|s| !s.trim().is_empty() && !s.contains('\n'));
+        let Some(search) = &self.search else { return };
+        let field = search.field.clone();
+        if let Some(text) = selected {
+            field.update(cx, |f, _| f.set_text(text.trim()));
+            self.update_query(cx);
+        }
+        field.update(cx, |f, cx| f.focus(window, cx));
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn update_query(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        let query = search.field.read(cx).text().to_string();
+        if query == search.query {
+            return;
+        }
+        search.regex = (!query.is_empty())
+            .then(|| RegexSearch::new(&escape_regex(&query)).ok())
+            .flatten();
+        search.query = query;
+        search.current = None;
+        self.run_search(true);
+        cx.notify();
+    }
+
+    /// スクロールバック全体を検索し直す。`jump` なら画面に近いマッチを選んでそこへ移動
+    fn run_search(&mut self, jump: bool) {
+        let version = self.content_version;
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        search.searched_version = version;
+        search.last_run = Some(Instant::now());
+        let mut term = self.terminal.shared.term.lock();
+        search.matches = match search.regex.as_mut() {
+            Some(regex) => {
+                let start = GridPoint::new(term.topmost_line(), Column(0));
+                let end = GridPoint::new(term.bottommost_line(), term.last_column());
+                RegexIter::new(start, end, GridDirection::Right, &term, regex)
+                    .take(MAX_MATCHES)
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        let n = search.matches.len();
+        if n == 0 {
+            search.current = None;
+            return;
+        }
+        if jump {
+            // 画面のいちばん下から上に向かって最初のマッチ（いちばん新しい出力の近く）
+            let bottom = Line(term.screen_lines() as i32 - 1 - term.grid().display_offset() as i32);
+            let i = search
+                .matches
+                .iter()
+                .rposition(|m| m.start().line <= bottom)
+                .unwrap_or(0);
+            search.current = Some(i);
+            term.scroll_to_point(*search.matches[i].start());
+        } else if let Some(i) = search.current {
+            search.current = Some(i.min(n - 1));
+        }
+    }
+
+    /// 次 / 前のマッチへ（older = 上へ = 古い出力の方へ）
+    fn search_step(&mut self, older: bool, cx: &mut Context<Self>) {
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| s.searched_version != self.content_version)
+        {
+            self.run_search(false);
+        }
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        let n = search.matches.len();
+        if n == 0 {
+            return;
+        }
+        let i = match search.current {
+            None => n - 1,
+            Some(i) if older => (i + n - 1) % n,
+            Some(i) => (i + 1) % n,
+        };
+        search.current = Some(i);
+        let point = *search.matches[i].start();
+        self.terminal.shared.term.lock().scroll_to_point(point);
+        cx.notify();
+    }
+
+    /// 出力が増えたら検索し直す（出力が続いている間は間引く）
+    fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        let version = self.content_version;
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        if search.searched_version == version || search.regex.is_none() {
+            return;
+        }
+        let due = search
+            .last_run
+            .is_none_or(|t| t.elapsed() >= SEARCH_REFRESH);
+        if due {
+            self.run_search(false);
+        } else if search.refresh.is_none() {
+            search.refresh = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SEARCH_REFRESH).await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(s) = this.search.as_mut() {
+                        s.refresh = None;
+                    }
+                    cx.notify();
+                });
+            }));
+        }
+    }
+
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = self.search.as_ref()?;
+        let c = crate::theme::th();
+        let count = match (search.current, search.matches.len()) {
+            (_, 0) if search.query.is_empty() => String::new(),
+            (_, 0) => "見つかりません".to_string(),
+            (Some(i), n) if n >= MAX_MATCHES => format!("{}/{}+", i + 1, n),
+            (Some(i), n) => format!("{}/{}", i + 1, n),
+            (None, n) => format!("{n} 件"),
+        };
+        let button = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(px(5.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .text_color(rgb(c.text_dim))
+                .hover(|s| s.bg(rgb(c.hover_bg)).text_color(rgb(c.text)))
+                .child(label)
+        };
+        Some(
+            div()
+                .id("terminal-search")
+                .absolute()
+                .top(px(6.))
+                .right(px(14.))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .pl(px(8.))
+                .pr(px(4.))
+                .py(px(3.))
+                .rounded(px(7.))
+                .bg(rgb(c.menu_bg))
+                .border_1()
+                .border_color(rgb(c.panel_border))
+                .shadow_md()
+                .text_size(px(crate::theme::UI_SMALL))
+                .text_color(rgb(c.text))
+                // ここでのクリックをターミナル（文字選択）に渡さない
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().w(px(200.)).h(px(22.)).child(search.field.clone()))
+                .child(
+                    div()
+                        .flex_none()
+                        .min_w(px(48.))
+                        .text_color(rgb(c.text_dim))
+                        .child(count),
+                )
+                .child(
+                    button("search-older", "↑")
+                        .on_click(cx.listener(|this, _, _, cx| this.search_step(true, cx))),
+                )
+                .child(
+                    button("search-newer", "↓")
+                        .on_click(cx.listener(|this, _, _, cx| this.search_step(false, cx))),
+                )
+                .child(
+                    button("search-close", "✕")
+                        .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Windows Terminal と同じ: 選択があればコピー、なければ貼り付け
@@ -504,6 +983,8 @@ struct Prepared {
     background: Hsla,
     rects: Vec<(Bounds<Pixels>, Hsla)>,
     texts: Vec<TextBatch>,
+    /// リンクの下線
+    underlines: Vec<Bounds<Pixels>>,
     cursor: Option<(Bounds<Pixels>, Hsla, CursorShape)>,
     marked: Option<(Point<Pixels>, ShapedLine)>,
 }
@@ -535,6 +1016,37 @@ impl Render for TerminalView {
         let palette = super::colors::current();
         let selection_color = crate::theme::th().selection;
         let background = to_hsla(palette.background);
+
+        // 検索のマッチ（画面に見えている分）とリンクの下線
+        self.refresh_search(cx);
+        let (search_hl, link_segments) = {
+            let term = self.terminal.shared.term.lock();
+            let offset = term.grid().display_offset() as i32;
+            let top = Line(-offset);
+            let bottom = Line(term.screen_lines() as i32 - 1 - offset);
+            let hl: Vec<(Match, bool)> = self
+                .search
+                .as_ref()
+                .map(|s| {
+                    s.matches
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, m)| m.end().line >= top && m.start().line <= bottom)
+                        .map(|(i, m)| (m.clone(), s.current == Some(i)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let segs: Vec<(i32, usize, usize)> = self
+                .hover_link
+                .iter()
+                .flat_map(|h| h.segments.iter())
+                .map(|(line, s, e)| (line.0 + offset, *s, *e))
+                .collect();
+            (hl, segs)
+        };
+        let match_bg = Hsla::from(rgb(crate::theme::th().amber)).opacity(0.35);
+        let current_bg = Hsla::from(rgb(crate::theme::th().amber));
+        let link_color = to_hsla(palette.foreground);
 
         let terminal_canvas = canvas(
             move |bounds, window, _cx| {
@@ -658,10 +1170,20 @@ impl Render for TerminalView {
                     let wide = cell.flags.contains(Flags::WIDE_CHAR);
                     let width_cells = if wide { 2 } else { 1 };
                     let selected = selection.is_some_and(|s| s.contains(indexed.point));
+                    let found = search_hl
+                        .iter()
+                        .find(|(m, _)| m.contains(&indexed.point))
+                        .map(|(_, current)| *current);
+                    if found == Some(true) {
+                        // 選んでいるマッチは濃い背景に暗い文字
+                        fg = palette.background;
+                    }
 
-                    // 背景（既定色以外 or 選択中）。同じ色が続けば矩形を伸ばす
+                    // 背景（既定色以外 or 選択中 or 検索のマッチ）。同じ色が続けば矩形を伸ばす
                     let bg_color = if selected {
                         Some(selection_bg)
+                    } else if let Some(current) = found {
+                        Some(if current { current_bg } else { match_bg })
                     } else if bg != default_bg {
                         Some(to_hsla(bg))
                     } else {
@@ -726,6 +1248,19 @@ impl Render for TerminalView {
                 }
                 flush(&mut batch, current_row, &mut texts);
 
+                // Ctrl を押して乗せているリンクの下線
+                let underlines: Vec<Bounds<Pixels>> = link_segments
+                    .iter()
+                    .filter(|(row, _, _)| *row >= 0 && (*row as u16) < rows)
+                    .map(|(row, s, e)| {
+                        let o = cell_origin(*row, *s);
+                        Bounds::new(
+                            point(o.x, o.y + cell_height - px(2.)),
+                            size(cell_width * (*e - *s) as f32, px(1.)),
+                        )
+                    })
+                    .collect();
+
                 // カーソル
                 let cursor_point = content.cursor.point;
                 let cursor_row = cursor_point.line.0 + display_offset;
@@ -772,6 +1307,7 @@ impl Render for TerminalView {
                     background,
                     rects,
                     texts,
+                    underlines,
                     cursor,
                     marked,
                 }
@@ -786,6 +1322,9 @@ impl Render for TerminalView {
                     let _ = t
                         .line
                         .paint(t.origin, line_height, TextAlign::Left, None, window, cx);
+                }
+                for u in &prepared.underlines {
+                    window.paint_quad(fill(*u, link_color));
                 }
 
                 if let Some((origin, line)) = &prepared.marked {
@@ -825,10 +1364,13 @@ impl Render for TerminalView {
         .size_full();
 
         let exited = self.exited;
+        let search_bar = self.render_search_bar(cx);
+        let hovering_link = self.hover_link.is_some();
         div()
             .id("terminal")
             .key_context("Terminal")
             .track_focus(&self.focus_handle)
+            .relative()
             .size_full()
             .pl(px(10.))
             .pr(px(6.))
@@ -840,9 +1382,13 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_left_up))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_action(cx.listener(Self::open_search))
+            .when(hovering_link, |el| el.cursor_pointer())
             .child(terminal_canvas)
+            .children(search_bar)
             .when(exited, |el| {
-                el.relative().child(
+                el.child(
                     div()
                         .absolute()
                         .bottom_2()
@@ -959,5 +1505,58 @@ impl EntityInputHandler for TerminalView {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+/// 入力をそのままの文字として検索するため、正規表現の記号をエスケープする
+fn escape_regex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        if matches!(
+            c,
+            '\\' | '.'
+                | '+'
+                | '*'
+                | '?'
+                | '('
+                | ')'
+                | '|'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '^'
+                | '$'
+                | '#'
+                | '&'
+                | '-'
+                | '~'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_regex;
+    use alacritty_terminal::term::search::RegexSearch;
+
+    #[test]
+    fn escaped_queries_compile() {
+        for q in [
+            "a.b",
+            "(x)",
+            "C:\\repo",
+            "[1/3]",
+            "foo$",
+            "a-b~c#d&e",
+            "日本語",
+        ] {
+            assert!(RegexSearch::new(&escape_regex(q)).is_ok(), "{q}");
+        }
+        assert_eq!(escape_regex("a.b"), "a\\.b");
     }
 }
