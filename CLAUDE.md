@@ -95,7 +95,8 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | Ctrl+Shift+PageDown / PageUp | 次 / 前のワークスペース |
 | Ctrl+1〜8 / Ctrl+9 | 1〜8 番目 / 最後のワークスペース |
 | Ctrl+Shift+R | ワークスペース名の変更（サイドバーのダブルクリック、右クリックメニューでも可） |
-| サイドバーで右クリック | 名前を変更 / 新しいワークスペース / 削除 |
+| サイドバーで右クリック | 名前を変更 / 新しいワークスペース / 上へ移動 / 下へ移動 / 削除 |
+| サイドバーのワークスペースをドラッグ | 並べ替え（落としたワークスペースの位置に入る。一覧の空きに落とすといちばん下） |
 | Ctrl+Shift+T | フォーカス中の区画に新しいタブ（今のフォルダで開く） |
 | Ctrl+] / Ctrl+[（Ctrl+Tab / Ctrl+Shift+Tab） | 区画内の次 / 前のタブ |
 | Ctrl+D / Ctrl+Shift+D | 区画を右に分割 / 下に分割（Ctrl+Shift+E も下に分割。各区画のタブ行の ◫ ⊟ でも可） |
@@ -157,7 +158,7 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
 ## 見た目（cmux / herdr を参考）
 
 - テーマは `theme.rs` の `THEMES`（ターミナルの 16 色＋前景・背景だけを定義）。UI の色は `derive()` で自動生成し、コードからは `th().text` のように参照する。テーマを足すときは `THEMES` に 1 件追加するだけでよい
-- 背景の透過: 設定の `opacity`（1.0 = 透過なし）と `backdrop`（ぼかし / 透かす / Mica / Mica Alt）。`window.rs` の `apply_backdrop` で `WindowBackgroundAppearance` を切り替え、背景は `theme::bg()` で透明度つきで塗る。重ね塗りで濃くならないよう、透過中はルートとターミナル本体（`view.rs`）は背景を塗らず、サイドバー・タブの行・区画の枠だけが塗る
+- 背景の透過: 設定の `opacity`（1.0 = 透過なし）と `backdrop`（透かす / ぼかし / Mica / Mica Alt。既定は透かす）。後ろのウィンドウが見えるのは「透かす」だけ（ぼかしは Windows のアクリル効果で白っぽくぼやけ、Mica は壁紙の色だけが出る）。settings.json の `version` が 0 の「ぼかし」は読み込み時に「透かす」に直す。`window.rs` の `apply_backdrop` で `WindowBackgroundAppearance` を切り替え、背景は `theme::bg()` で透明度つきで塗る。重ね塗りで濃くならないよう、透過中はルートとターミナル本体（`view.rs`）は背景を塗らず、サイドバー・タブの行・区画の枠だけが塗る
 - 行の高さ（`theme::line_height()`）とカーソルの形（`terminal::set_default_cursor` → alacritty の `default_cursor_style`）も設定画面から変更できる
 - 今のターミナル配色は `terminal::colors::current()`（PTY の読み取りスレッドからも参照するためグローバル）
 - 文字サイズ: ターミナル 13（Ghostty / cmux の既定）、UI 13 / タブ 12.5 / 補足 11.5
@@ -205,7 +206,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] URL・ファイルパスの Ctrl+クリック（OSC 8 のリンクにも対応）
 - [x] 分割境界のドラッグでサイズ変更（`DraggedDivider`。比率は session.json に保存）・Alt+Shift+矢印
 - [ ] 設定ファイル（`%APPDATA%\wimux\config.toml`: フォント、サイズ、配色、シェル、キー割り当て）
-- [ ] タブのドラッグ並べ替え、ワークスペースの並べ替え
+- [x] タブのドラッグ並べ替え、ワークスペースの並べ替え（サイドバーでドラッグ・右クリックの上へ / 下へ移動）
 
 ### Phase 2: 記憶と復元 ✅
 - [x] レイアウト＋ペインごとの cwd / conda / Claude 起動状態を保存（変更から 0.8 秒後・終了時）
@@ -243,6 +244,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - 参考実装: Zed の `crates/terminal` / `crates/terminal_view`（GPL なのでコードはコピーしない。読むだけ）、`gpui-terminal` クレート（MIT/Apache）
 - `use gpui_kit::*` すると GPUI の `test` マクロが Rust 標準の `#[test]` を隠してしまう。テストモジュールでは `use super::*` を避け、必要なものだけ import する
 - gpui-kit の Root は `tab` / `shift-tab`（フォーカス移動）と `ctrl-c`（コピー）にキーを割り当てている。キー割り当てはターミナルの `on_key_down` より先に処理されるため、`window.rs` で `Terminal` コンテキストに `NoAction` を割り当てて無効にしている。ターミナルで効かないキーがあれば、まずここを疑う
+- ブラウザ（別ウィンドウ）を隠す条件は `sync_browsers` と `render_browser` で必ず揃える。ずれると描画のたびに「隠す → 表示」を繰り返してチカチカする。境界のドラッグ（`resizing`）中は隠さず、タブ・ワークスペースのドラッグ中だけ隠す（`tab_dragging`）
 - WebView2 の作成中は Windows のメッセージループが回る。GPUI の処理の途中（render や action の中）で作ると GPUI が二重に呼ばれて壊れるので、`sync_browsers` では生のウィンドウハンドルだけを持って非同期タスクの中で作っている
 - GPUI（Windows）は DirectComposition の描画を子ウィンドウより **上** に重ねる（`CreateTargetForHwnd(hwnd, true)`）ため、WebView2 を子ウィンドウにすると隠れて見えない。そこで `browser.rs` の `host::HostWindow`（メインウィンドウに所有された枠なしウィンドウ）に WebView2 を入れ、区画の位置（画面座標）に重ねている。メインウィンドウを動かしたときは window.rs の 30ms タイマーで `reposition` して追従させる
 - Windows 専用コードは Linux でも型チェックできる: `RUSTFLAGS="--cfg wimux_check" cargo check`
