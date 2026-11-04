@@ -236,12 +236,22 @@ function global:claude {
         return
     }
     __wimux_agent_started "claude"
+    $extra = @()
+    # Sondev's browser (MCP "sondev-browser"), when "AI browser control" is on.
+    # Not for subcommands (claude mcp ..., claude config ...).
+    # --mcp-config takes several files, so it must be followed by another option (--settings).
+    $mcp = $env:WIMUX_CLAUDE_MCP
     $settings = $env:WIMUX_CLAUDE_SETTINGS
-    if ($settings -and (Test-Path -LiteralPath $settings)) {
-        & $exe.Source --settings $settings @args
-    } else {
-        & $exe.Source @args
+    $has_settings = $settings -and (Test-Path -LiteralPath $settings)
+    $sub = @("mcp", "config", "update", "doctor", "install", "setup-token", "plugin", "migrate-installer")
+    $is_sub = $args.Count -gt 0 -and ($sub -contains "$($args[0])")
+    if ($mcp -and $has_settings -and -not $is_sub -and (Test-Path -LiteralPath $mcp)) {
+        $extra += @("--mcp-config", $mcp)
     }
+    if ($has_settings) {
+        $extra += @("--settings", $settings)
+    }
+    & $exe.Source @extra @args
 }
 
 # ---------------------------------------------------------------------------
