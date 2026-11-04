@@ -902,7 +902,13 @@ impl WimuxWindow {
     }
 
     /// タブをドラッグで移動する（並べ替え・別の区画へ・分割して置く・別のワークスペースへ）
-    fn move_tab(&mut self, pane: PaneId, dest: TabDest, window: &mut Window, cx: &mut Context<Self>) {
+    fn move_tab(
+        &mut self,
+        pane: PaneId,
+        dest: TabDest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.drop_hint = None;
         let Some((src_wi, src_gid, src_idx)) = self.locate(pane) else {
             return;
@@ -910,7 +916,9 @@ impl WimuxWindow {
         let src_len = self.groups.get(&src_gid).map_or(0, |g| g.tabs.len());
         match dest {
             // 自分の区画の中央、または 1 枚しかないタブで自分の区画を分割 → 何もしない（選ぶだけ）
-            TabDest::Zone { gid, zone } if gid == src_gid && (zone == DropZone::Center || src_len == 1) => {
+            TabDest::Zone { gid, zone }
+                if gid == src_gid && (zone == DropZone::Center || src_len == 1) =>
+            {
                 self.select_tab(src_gid, src_idx, window, cx);
                 return;
             }
@@ -931,7 +939,11 @@ impl WimuxWindow {
 
         // 元の区画から外す（空になった区画はツリーからも外す）
         let mut src_ws_empty = false;
-        if self.groups.get_mut(&src_gid).is_some_and(|g| g.remove(pane)) {
+        if self
+            .groups
+            .get_mut(&src_gid)
+            .is_some_and(|g| g.remove(pane))
+        {
             self.groups.remove(&src_gid);
             let ws = &mut self.workspaces[src_wi];
             let root = std::mem::replace(&mut ws.root, Node::Leaf(0));
@@ -1014,10 +1026,7 @@ impl WimuxWindow {
 
     /// タブをドラッグしている間、区画に重ねる「ここに落とすとこうなる」表示と受け口
     fn render_drop_overlay(&self, gid: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
-        let hint = self
-            .drop_hint
-            .filter(|(g, _)| *g == gid)
-            .map(|(_, z)| z);
+        let hint = self.drop_hint.filter(|(g, _)| *g == gid).map(|(_, z)| z);
         let accent = th().accent;
         div()
             .id(("drop-zone", gid))
@@ -1846,10 +1855,12 @@ impl WimuxWindow {
             conda: pane.and_then(|p| p.conda.clone()),
             claude: pane.is_some_and(|p| p.claude != ClaudeState::None),
             // フックが記録した今のセッション。まだ無ければ前回から引き継いだもの
-            claude_session: pane.filter(|p| p.claude != ClaudeState::None).and_then(|p| {
-                crate::claude_session::read(&crate::claude_session::pane_key(id))
-                    .or_else(|| p.claude_session.clone())
-            }),
+            claude_session: pane
+                .filter(|p| p.claude != ClaudeState::None)
+                .and_then(|p| {
+                    crate::claude_session::read(&crate::claude_session::pane_key(id))
+                        .or_else(|| p.claude_session.clone())
+                }),
             url: pane.and_then(|p| p.url.clone()),
         }
     }
@@ -2118,9 +2129,7 @@ impl WimuxWindow {
                 .when(selected, |el| el.bg(rgb(th().selected_bg)))
                 .when(!selected, |el| el.hover(|s| s.bg(rgb(th().hover_bg))))
                 // タブをワークスペースに落とすと、そのワークスペースへ移動
-                .drag_over::<DraggedTab>(|s, _, _, _| {
-                    s.bg(rgb(th().hover_bg_strong))
-                })
+                .drag_over::<DraggedTab>(|s, _, _, _| s.bg(rgb(th().hover_bg_strong)))
                 .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
                     this.move_tab(d.pane, TabDest::Workspace(i), window, cx);
                 }))
@@ -2915,9 +2924,7 @@ impl WimuxWindow {
                         label: d.label.clone(),
                     })
                 })
-                .drag_over::<DraggedTab>(move |s, _, _, _| {
-                    s.border_l_2().border_color(rgb(accent))
-                })
+                .drag_over::<DraggedTab>(move |s, _, _, _| s.border_l_2().border_color(rgb(accent)))
                 .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
                     this.move_tab(d.pane, TabDest::Tab { gid, index: i }, window, cx);
                 }))
@@ -3005,7 +3012,15 @@ impl WimuxWindow {
             .id(("group-tabs", gid))
             // タブの行の空いているところに落とすと最後に加える
             .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
-                this.move_tab(d.pane, TabDest::Tab { gid, index: usize::MAX }, window, cx);
+                this.move_tab(
+                    d.pane,
+                    TabDest::Tab {
+                        gid,
+                        index: usize::MAX,
+                    },
+                    window,
+                    cx,
+                );
             }))
             .drag_over::<DraggedTab>(|s, _, _, _| s.bg(rgb(th().hover_bg)))
             .flex()
@@ -3374,7 +3389,11 @@ impl Render for WimuxWindow {
             self.ensure_view(*id, window, cx);
         }
         self.sync_browsers(&visible, window, cx);
-        window.set_window_title(&format!("{} — {}", crate::APP_NAME, self.workspace_name(self.active)));
+        window.set_window_title(&format!(
+            "{} — {}",
+            crate::APP_NAME,
+            self.workspace_name(self.active)
+        ));
 
         let rects: HashMap<GroupId, crate::workspace::Rect> = root.rects().into_iter().collect();
         // 境界のドラッグが終わったら印を消す

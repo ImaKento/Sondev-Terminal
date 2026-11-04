@@ -1,0 +1,90 @@
+# CI
+#
+# - PR: Linux だけで軽く確認（フォーマット・テスト・Windows 専用コードの型チェック）
+# - main へのマージ（push）: 上に加えて Windows でリリースビルド → インストーラーを作り、成果物として残す
+#
+# private リポジトリは Windows ランナーの分数が Linux の 2 倍かかるので、PR では Windows を動かさない。
+# Windows で確かめたい PR は、Actions の画面から「Run workflow」でブランチを選んで手動実行できる。
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    name: Linux（fmt / test / Windows コードの型チェック）
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: 依存ライブラリ（GPUI / wry を Linux でビルドするため）
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libxkbcommon-dev \
+            libwayland-dev libvulkan-dev libx11-xcb-dev libxcb1-dev \
+            libfontconfig-dev libfreetype-dev libssl-dev libasound2-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: Windows 専用コードの型チェック（--cfg wimux_check）
+        run: cargo check --locked --all-targets
+        env:
+          RUSTFLAGS: --cfg wimux_check
+
+  windows:
+    name: Windows（リリースビルド・インストーラー）
+    # PR では動かさない（main へのマージと手動実行のときだけ）
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # リリースプロファイルのキャッシュ（テスト用のデバッグビルドとは別にする）
+          key: release
+
+      - name: ツール（Inno Setup・cargo-about）
+        uses: ./.github/actions/windows-tools
+
+      - name: インストーラーを作る
+        shell: pwsh
+        run: ./installer/build.ps1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: 成果物を残す
+        uses: actions/upload-artifact@v4
+        with:
+          name: SondevTerminal-${{ github.sha }}
+          path: |
+            dist/SondevTerminal-setup-*.exe
+            target/release/sondev.exe
+          retention-days: 14

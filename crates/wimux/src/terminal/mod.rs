@@ -229,7 +229,10 @@ impl Terminal {
         cmd.env("WIMUX", "1");
         cmd.env("WIMUX_PANE_ID", &opts.pane_id);
         // 同梱の fzf.exe などを探す場所（exe と同じフォルダ）
-        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        {
             cmd.env("WIMUX_BIN_DIR", dir);
         }
         // claude 関数が使う、セッション ID を記録するフックの設定

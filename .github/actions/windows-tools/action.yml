@@ -1,0 +1,27 @@
+# インストーラーを作るのに使うツールを Windows ランナーに入れる（CI とリリースで共通）
+name: windows-tools
+description: Inno Setup 6 と cargo-about を用意する
+
+runs:
+  using: composite
+  steps:
+    - name: Inno Setup 6
+      shell: pwsh
+      run: |
+        $iscc = @(
+          "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+          "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($iscc) {
+          Write-Host "Inno Setup: $iscc"
+        } else {
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup をインストールできませんでした" }
+        }
+
+    # ライセンス一覧（THIRD_PARTY_LICENSES.html）の生成用。入らなくても build.ps1 は一覧なしで続ける
+    - name: cargo-about
+      uses: taiki-e/install-action@v2
+      continue-on-error: true
+      with:
+        tool: cargo-about
