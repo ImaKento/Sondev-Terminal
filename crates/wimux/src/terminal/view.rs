@@ -131,6 +131,10 @@ pub struct TerminalView {
     /// 画面の内容の版（出力が来るたびに増える）
     content_version: u64,
     hover_link: Option<HoverLink>,
+    /// アプリに送っているマウスのボタン（押している間。離したときに同じボタンで送る）
+    mouse_button: Option<u8>,
+    /// 最後にアプリへ送ったマウスの位置（同じセルでは動きを送らない）
+    mouse_cell: Option<(usize, usize)>,
     last_output: Option<Instant>,
     last_input: Option<Instant>,
     _io_task: Task<()>,
@@ -193,6 +197,8 @@ impl TerminalView {
             search: None,
             content_version: 0,
             hover_link: None,
+            mouse_button: None,
+            mouse_cell: None,
             last_output: None,
             last_input: None,
             _io_task: io_task,
@@ -482,6 +488,31 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// アプリがマウスの操作を受け取りたがっているか（Claude Code の全画面表示・vim など）。
+    /// Shift を押しているときは wimux の文字選択を使う（ほかのターミナルと同じ）
+    fn app_wants_mouse(&self, modifiers: &Modifiers) -> bool {
+        !modifiers.shift && self.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// マウス位置のセル（1 始まりの列, 行。画面の左上が 1, 1）
+    fn mouse_cell_at(&self, pos: Point<Pixels>) -> Option<(usize, usize)> {
+        let (p, _) = self.grid_point(pos)?;
+        let offset = self.terminal.shared.term.lock().grid().display_offset() as i32;
+        Some((p.column.0 + 1, (p.line.0 + offset + 1).max(1) as usize))
+    }
+
+    /// アプリへマウスの押下・離す・動きを送る。`button`: 0=左 1=中 2=右（動きは +32）
+    fn send_mouse(&mut self, button: u8, pos: Point<Pixels>, modifiers: &Modifiers, pressed: bool) {
+        let Some((col, row)) = self.mouse_cell_at(pos) else {
+            return;
+        };
+        let sgr = self.mode().contains(TermMode::SGR_MOUSE);
+        if let Some(bytes) = mouse_report(button, modifiers, col, row, pressed, sgr) {
+            self.mouse_cell = Some((col, row));
+            self.terminal.shared.write(&bytes);
+        }
+    }
+
     fn on_left_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
         // Ctrl+クリック: URL・ファイルを開く
@@ -489,6 +520,14 @@ impl TerminalView {
             && let Some(link) = self.link_at(ev.position)
         {
             self.open_link(link.target, ev.modifiers.shift, cx);
+            return;
+        }
+        // アプリがマウスを使っているなら、クリックをそのまま送る（Claude Code のボタンなど）
+        if self.app_wants_mouse(&ev.modifiers) {
+            self.terminal.shared.term.lock().selection = None;
+            self.mouse_button = Some(0);
+            self.send_mouse(0, ev.position, &ev.modifiers, true);
+            cx.notify();
             return;
         }
         let Some((point, side)) = self.grid_point(ev.position) else {
@@ -505,6 +544,26 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // アプリへマウスの動きを送る（ボタンを押したままの移動、または動きを全部欲しいアプリ）
+        let mode = self.mode();
+        let dragging = self
+            .mouse_button
+            .filter(|_| mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION));
+        let hovering = self.mouse_button.is_none()
+            && !self.selecting
+            && mode.contains(TermMode::MOUSE_MOTION)
+            && !ev.modifiers.shift;
+        if dragging.is_some() || hovering {
+            let cell = self.mouse_cell_at(ev.position);
+            if cell.is_some() && cell != self.mouse_cell {
+                // 動き = ボタン + 32。ボタンなしの動きは 3 + 32
+                let button = dragging.unwrap_or(3) + 32;
+                self.send_mouse(button, ev.position, &ev.modifiers, true);
+            }
+            if dragging.is_some() {
+                return;
+            }
+        }
         if !self.selecting || ev.pressed_button != Some(MouseButton::Left) {
             self.update_hover(ev.position, ev.modifiers.control, cx);
             return;
@@ -517,7 +576,12 @@ impl TerminalView {
         }
     }
 
-    fn on_left_up(&mut self, _ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_left_up(&mut self, ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.mouse_button == Some(0) {
+            self.mouse_button = None;
+            self.send_mouse(0, ev.position, &ev.modifiers, false);
+            return;
+        }
         if !self.selecting {
             return;
         }
@@ -895,9 +959,41 @@ impl TerminalView {
         )
     }
 
+    fn on_right_up(&mut self, ev: &MouseUpEvent, _window: &mut Window, _cx: &mut Context<Self>) {
+        if self.mouse_button == Some(2) {
+            self.mouse_button = None;
+            self.send_mouse(2, ev.position, &ev.modifiers, false);
+        }
+    }
+
+    fn on_middle_down(
+        &mut self,
+        ev: &MouseDownEvent,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.focus_handle.focus(window, _cx);
+        if self.app_wants_mouse(&ev.modifiers) {
+            self.mouse_button = Some(1);
+            self.send_mouse(1, ev.position, &ev.modifiers, true);
+        }
+    }
+
+    fn on_middle_up(&mut self, ev: &MouseUpEvent, _window: &mut Window, _cx: &mut Context<Self>) {
+        if self.mouse_button == Some(1) {
+            self.mouse_button = None;
+            self.send_mouse(1, ev.position, &ev.modifiers, false);
+        }
+    }
+
     /// Windows Terminal と同じ: 選択があればコピー、なければ貼り付け
-    fn on_right_down(&mut self, _ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        if self.app_wants_mouse(&ev.modifiers) {
+            self.mouse_button = Some(2);
+            self.send_mouse(2, ev.position, &ev.modifiers, true);
+            return;
+        }
         if self.has_selection() {
             self.copy_selection(cx);
         } else {
@@ -1391,6 +1487,9 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_left_up))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_right_up))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_down))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_middle_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_action(cx.listener(Self::open_search))
             .when(hovering_link, |el| el.cursor_pointer())
@@ -1517,6 +1616,47 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
+/// マウスの報告（アプリへ送る列）。SGR 形式（`ESC [ < b ; x ; y M/m`）か、古い X10 形式（`ESC [ M` + 3 バイト）。
+/// `button`: 0=左 1=中 2=右、+32 で動き。修飾キーは Shift=+4、Alt=+8、Ctrl=+16
+fn mouse_report(
+    button: u8,
+    modifiers: &Modifiers,
+    col: usize,
+    row: usize,
+    pressed: bool,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    let mut b = button as usize;
+    if modifiers.shift {
+        b += 4;
+    }
+    if modifiers.alt {
+        b += 8;
+    }
+    if modifiers.control {
+        b += 16;
+    }
+    if sgr {
+        let end = if pressed { 'M' } else { 'm' };
+        return Some(format!("\x1b[<{b};{col};{row}{end}").into_bytes());
+    }
+    // X10 形式は離したときのボタンを区別できない（3 = 離した）。座標は 223 まで
+    if !pressed {
+        b = (b & !3) | 3;
+    }
+    if col > 223 || row > 223 {
+        return None;
+    }
+    Some(vec![
+        0x1b,
+        b'[',
+        b'M',
+        (32 + b) as u8,
+        (32 + col) as u8,
+        (32 + row) as u8,
+    ])
+}
+
 /// 入力をそのままの文字として検索するため、正規表現の記号をエスケープする
 fn escape_regex(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
@@ -1550,7 +1690,43 @@ fn escape_regex(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::escape_regex;
+    use super::{escape_regex, mouse_report};
+    use gpui_kit::Modifiers;
+
+    #[test]
+    fn mouse_reports() {
+        let none = Modifiers::default();
+        assert_eq!(
+            mouse_report(0, &none, 5, 3, true, true).unwrap(),
+            b"\x1b[<0;5;3M"
+        );
+        assert_eq!(
+            mouse_report(0, &none, 5, 3, false, true).unwrap(),
+            b"\x1b[<0;5;3m"
+        );
+        assert_eq!(
+            mouse_report(32, &none, 6, 3, true, true).unwrap(),
+            b"\x1b[<32;6;3M"
+        );
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            mouse_report(2, &ctrl, 1, 1, true, true).unwrap(),
+            b"\x1b[<18;1;1M"
+        );
+        // X10: 押す = 32 + ボタン、離す = 32 + 3
+        assert_eq!(
+            mouse_report(0, &none, 1, 1, true, false).unwrap(),
+            b"\x1b[M !!"
+        );
+        assert_eq!(
+            mouse_report(0, &none, 1, 1, false, false).unwrap(),
+            b"\x1b[M#!!"
+        );
+        assert!(mouse_report(0, &none, 300, 1, true, false).is_none());
+    }
     use alacritty_terminal::term::search::RegexSearch;
 
     #[test]
