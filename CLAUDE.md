@@ -78,7 +78,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 **リリース（GitHub Actions）**: Actions → Release → Run workflow でバージョン（例 `0.2.0`）を入れるか、`git tag v0.2.0 && git push origin v0.2.0`。
 Windows ランナーでインストーラーを作り、GitHub Releases に置く（バージョンはタグから決めるので Cargo.toml を上げるコミットは不要）。
 
-**CI**: PR は Linux で fmt・test・`--cfg wimux_check` の型チェックだけ（軽い）。main へのマージで Windows のリリースビルドとインストーラー作成まで行い、Actions の成果物に残す。
+**CI**: PR と main へのマージでは Linux で fmt・test・`--cfg wimux_check` の型チェックだけ（軽い）。Windows のリリースビルドとインストーラー作成は、Actions → CI → Run workflow で手動実行したときだけ（Windows ランナーは分数が 2 倍で数えられ、1 回 20 分ほどかかるため）。
 
 - `installer/wimux.iss` … Inno Setup の設定。管理者権限なしで `%LOCALAPPDATA%\Programs\wimux` に入る。`AppId` は変えない（アップデートの判定に使う）
 - `crates/wimux/build.rs` … exe にアイコン（`assets/wimux.ico`、リソース ID 1）とバージョン情報を埋め込む
