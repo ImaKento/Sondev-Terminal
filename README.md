@@ -125,10 +125,13 @@ Claude Code の全画面表示や vim など、アプリがマウスを使うと
 | Ctrl+T（Ctrl+Shift+T） | 新しいタブ（今のフォルダで開く） |
 | Ctrl+W（Ctrl+Shift+W） | タブを閉じる |
 | Ctrl+] / Ctrl+[（Ctrl+Tab / Ctrl+Shift+Tab） | 次 / 前のタブ |
-| Ctrl+D | 右に分割 |
-| Ctrl+Shift+D（Ctrl+Shift+E） | 下に分割 |
+| Ctrl+D | 右に分割（左右に並ぶ。縦の境界線ができる） |
+| Ctrl+Shift+D（Ctrl+Shift+E） | 下に分割（上下に並ぶ。横の境界線ができる） |
 | Ctrl+矢印 / Alt+矢印 | 隣の区画へ移動 |
 | Alt+Shift+矢印 | 分割の境界を動かす |
+
+各区画のタブ行の右にある **◫**（右に分割）・**⊟**（下に分割）のボタンでも分割できます。
+境界の線はマウスでドラッグしても動かせます。
 
 ### ブラウザ
 | キー | 動作 |
