@@ -117,6 +117,67 @@ pub fn write_hook_settings() -> Option<PathBuf> {
     Some(path)
 }
 
+/// Sondev のブラウザを Claude Code から操作するための MCP の設定（`claude --mcp-config` に渡す）。
+/// 設定の「AI からブラウザを操作」が ON のときだけ書き出し、OFF なら消す。
+/// これがあれば `claude mcp add` を手でしなくても、Sondev のペインで起動した Claude は
+/// どのプロジェクトでも Sondev のブラウザ（127.0.0.1:9222）を操作できる
+pub fn write_mcp_config(browser_cdp: bool) {
+    let path = mcp_config_path();
+    if !(browser_cdp && crate::browser::SUPPORTED) {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let config = mcp_config(
+        crate::settings::CDP_PORT,
+        &session::config_dir().join("playwright-mcp"),
+    );
+    let Ok(bytes) = serde_json::to_vec_pretty(&config) else {
+        return;
+    };
+    if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice())
+        && let Err(e) = session::write_atomic(&path, &bytes)
+    {
+        log::warn!("ブラウザ操作の MCP 設定を書き出せませんでした: {e}");
+    }
+}
+
+/// ペインに渡す MCP 設定の場所（書き出してあれば）
+pub fn mcp_config_file() -> Option<PathBuf> {
+    let path = mcp_config_path();
+    path.is_file().then_some(path)
+}
+
+fn mcp_config_path() -> PathBuf {
+    session::config_dir().join("claude-mcp.json")
+}
+
+/// Playwright MCP で、すでに開いている Sondev のブラウザ（CDP）につなぐ設定。
+/// 作業記録（ページのスナップショット・コンソールのログ）はプロジェクトのフォルダではなく
+/// wimux の保存先に書く（git の未追跡ファイルにならないように）
+fn mcp_config(port: u16, output_dir: &std::path::Path) -> serde_json::Value {
+    let mut args: Vec<String> = Vec::new();
+    // Windows の npx はバッチファイルなので cmd /c 経由で起動する（Claude Code の推奨）
+    let command = if cfg!(windows) {
+        args.extend(["/c".into(), "npx".into()]);
+        "cmd"
+    } else {
+        "npx"
+    };
+    args.extend([
+        "-y".into(),
+        "@playwright/mcp@latest".into(),
+        "--cdp-endpoint".into(),
+        format!("http://127.0.0.1:{port}"),
+        "--output-dir".into(),
+        output_dir.to_string_lossy().into_owned(),
+    ]);
+    serde_json::json!({
+        "mcpServers": {
+            "sondev-browser": { "command": command, "args": args }
+        }
+    })
+}
+
 /// 古い記録（1 週間より前）を消す
 pub fn cleanup() {
     let Ok(entries) = std::fs::read_dir(dir()) else {
@@ -138,7 +199,25 @@ pub fn cleanup() {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_id;
+    use super::{mcp_config, valid_id};
+
+    #[test]
+    fn mcp_config_points_at_sondev_browser() {
+        let v = mcp_config(9222, std::path::Path::new("/tmp/out"));
+        let server = &v["mcpServers"]["sondev-browser"];
+        let args: Vec<&str> = server["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--cdp-endpoint", "http://127.0.0.1:9222"])
+        );
+        assert!(args.windows(2).any(|w| w == ["--output-dir", "/tmp/out"]));
+        assert!(args.contains(&"@playwright/mcp@latest"));
+    }
 
     #[test]
     fn ids() {

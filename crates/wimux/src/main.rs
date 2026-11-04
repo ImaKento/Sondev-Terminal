@@ -45,6 +45,8 @@ fn main() {
     claude_session::cleanup();
     let s = settings::load();
     browser::init(s.browser_cdp.then_some(settings::CDP_PORT));
+    // Claude Code から Sondev のブラウザを操作する MCP の設定（ON のときだけ）
+    claude_session::write_mcp_config(s.browser_cdp);
 
     let keybindings = s.keybindings.clone();
     gpui_kit::application().run(move |cx| {

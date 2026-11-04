@@ -244,6 +244,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] 新しいウィンドウの要求（右クリックの「新しいウィンドウで開く」・`target="_blank"`・`window.open`）は別ウィンドウにせず、同じ区画の新しいタブで開く（`with_new_window_req_handler` → `BrowserMsg::NewWindow`）
 - [x] 見えない区画・別ワークスペース・ポップアップ表示中は `set_visible(false)` で隠す（子ウィンドウは GPUI の上に重なるため）
 - [x] 設定で「AI からブラウザを操作」を ON にすると `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`（再起動後に反映）
+- [x] そのとき `%APPDATA%\wimux\claude-mcp.json`（Playwright MCP を `--cdp-endpoint http://127.0.0.1:9222` でつなぐ設定）を書き出し、シェル連携の `claude` 関数が `--mcp-config` で渡す（`claude_session::write_mcp_config`）。`claude mcp add` は不要で、どのプロジェクトでも MCP「sondev-browser」が使える。作業記録は `--output-dir %APPDATA%\wimux\playwright-mcp` に出す（プロジェクトに `.playwright-mcp/` を作らない）。Chrome を別に起動しないこと（9222 は Sondev の WebView2 が使っている）
 - [ ] Windows での動作確認（Linux はブラウザペイン非対応）
 - [x] ブラウザをクリックしたら、その区画・タブをアクティブにする（WebView2 の GotFocus → `BrowserMsg::Focused`。クリックは別ウィンドウに行くので GPUI には届かない）
 - [x] ブラウザにフォーカスがある間も wimux のキー操作を効かせる（AcceleratorKeyPressed で拾って転送）

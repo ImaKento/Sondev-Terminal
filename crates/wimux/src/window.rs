@@ -3420,7 +3420,7 @@ impl WimuxWindow {
                             .gap(px(16.))
                             .child(row(
                                 "AI からブラウザを操作できるようにする",
-                                "Claude Code などが Playwright / Chrome DevTools MCP で 127.0.0.1:9222 に接続できます（再起動後に反映）",
+                                "Sondev のペインで起動した Claude Code は、自動で Sondev のブラウザを操作できます（MCP「sondev-browser」。Node.js が必要。再起動後に反映）",
                             ))
                             .child(cdp_toggle),
                     )

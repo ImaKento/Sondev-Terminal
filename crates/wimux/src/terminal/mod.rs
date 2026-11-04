@@ -254,6 +254,10 @@ impl Terminal {
         if let Some(path) = crate::claude_session::write_hook_settings() {
             cmd.env("WIMUX_CLAUDE_SETTINGS", path);
         }
+        // claude 関数が使う、Sondev のブラウザを操作する MCP の設定（設定で ON のときだけある）
+        if let Some(path) = crate::claude_session::mcp_config_file() {
+            cmd.env("WIMUX_CLAUDE_MCP", path);
+        }
 
         let mut child = pair
             .slave
