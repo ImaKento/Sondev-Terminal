@@ -6,12 +6,14 @@
 
 use std::sync::RwLock;
 
+use gpui_kit::{Hsla, Rgba};
+
 use crate::terminal::colors::{self, DEFAULT_PALETTE, Palette, rgb};
 
 /// ターミナルの既定の文字サイズ（Ghostty / cmux の既定に合わせて 13）
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
-/// ターミナルの行の高さ（文字サイズに対する倍率）
-pub const LINE_HEIGHT: f32 = 1.25;
+/// ターミナルの行の高さ（文字サイズに対する倍率）の既定値
+pub const DEFAULT_LINE_HEIGHT: f32 = 1.25;
 
 // UI の文字サイズ
 pub const UI_TEXT: f32 = 13.0;
@@ -138,6 +140,175 @@ pub const THEMES: &[ThemeDef] = &[
         ),
         accent: None,
     },
+    ThemeDef {
+        name: "Tokyo Night Storm",
+        palette: palette!(
+            0xc0caf5,
+            0x24283b,
+            0xc0caf5,
+            [
+                0x1d202f, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6,
+                0x414868, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc0caf5,
+            ]
+        ),
+        accent: None,
+    },
+    ThemeDef {
+        name: "One Dark",
+        palette: palette!(
+            0xabb2bf,
+            0x282c34,
+            0x528bff,
+            [
+                0x3f4451, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf,
+                0x5c6370, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff,
+            ]
+        ),
+        accent: None,
+    },
+    ThemeDef {
+        name: "GitHub Dark",
+        palette: palette!(
+            0xc9d1d9,
+            0x0d1117,
+            0x58a6ff,
+            [
+                0x484f58, 0xff7b72, 0x3fb950, 0xd29922, 0x58a6ff, 0xbc8cff, 0x39c5cf, 0xb1bac4,
+                0x6e7681, 0xffa198, 0x56d364, 0xe3b341, 0x79c0ff, 0xd2a8ff, 0x56d4dd, 0xffffff,
+            ]
+        ),
+        accent: Some(0x2f81f7),
+    },
+    ThemeDef {
+        name: "Monokai",
+        palette: palette!(
+            0xf8f8f2,
+            0x272822,
+            0xf8f8f0,
+            [
+                0x3e3d32, 0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xf8f8f2,
+                0x75715e, 0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xf9f8f5,
+            ]
+        ),
+        accent: Some(0xf92672),
+    },
+    ThemeDef {
+        name: "Solarized Dark",
+        palette: palette!(
+            0x839496,
+            0x002b36,
+            0x93a1a1,
+            [
+                0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+                0x586e75, 0xcb4b16, 0x859900, 0xb58900, 0x268bd2, 0x6c71c4, 0x2aa198, 0xfdf6e3,
+            ]
+        ),
+        accent: None,
+    },
+    ThemeDef {
+        name: "Rose Pine",
+        palette: palette!(
+            0xe0def4,
+            0x191724,
+            0xe0def4,
+            [
+                0x26233a, 0xeb6f92, 0x31748f, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xebbcba, 0xe0def4,
+                0x6e6a86, 0xeb6f92, 0x31748f, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xebbcba, 0xe0def4,
+            ]
+        ),
+        accent: Some(0xc4a7e7),
+    },
+    ThemeDef {
+        name: "Kanagawa",
+        palette: palette!(
+            0xdcd7ba,
+            0x1f1f28,
+            0xc8c093,
+            [
+                0x16161d, 0xc34043, 0x76946a, 0xc0a36e, 0x7e9cd8, 0x957fb8, 0x6a9589, 0xc8c093,
+                0x727169, 0xe82424, 0x98bb6c, 0xe6c384, 0x7fb4ca, 0x938aa9, 0x7aa89f, 0xdcd7ba,
+            ]
+        ),
+        accent: None,
+    },
+    ThemeDef {
+        name: "Everforest",
+        palette: palette!(
+            0xd3c6aa,
+            0x2d353b,
+            0xd3c6aa,
+            [
+                0x475258, 0xe67e80, 0xa7c080, 0xdbbc7f, 0x7fbbb3, 0xd699b6, 0x83c092, 0xd3c6aa,
+                0x859289, 0xe67e80, 0xa7c080, 0xdbbc7f, 0x7fbbb3, 0xd699b6, 0x83c092, 0xd3c6aa,
+            ]
+        ),
+        accent: Some(0xa7c080),
+    },
+    ThemeDef {
+        name: "Ayu Dark",
+        palette: palette!(
+            0xbfbdb6,
+            0x0b0e14,
+            0xe6b450,
+            [
+                0x1e232b, 0xea6c73, 0x7fd962, 0xf9af4f, 0x53bdfa, 0xcda1fa, 0x90e1c6, 0xc7c7c7,
+                0x686868, 0xf07178, 0xaad94c, 0xffb454, 0x59c2ff, 0xd2a6ff, 0x95e6cb, 0xffffff,
+            ]
+        ),
+        accent: Some(0xe6b450),
+    },
+    ThemeDef {
+        name: "Catppuccin Latte",
+        palette: palette!(
+            0x4c4f69,
+            0xeff1f5,
+            0xdc8a78,
+            [
+                0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be,
+                0x6c6f85, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xbcc0cc,
+            ]
+        ),
+        accent: Some(0x8839ef),
+    },
+    ThemeDef {
+        name: "GitHub Light",
+        palette: palette!(
+            0x24292f,
+            0xffffff,
+            0x0969da,
+            [
+                0x24292f, 0xcf222e, 0x116329, 0x4d2d00, 0x0969da, 0x8250df, 0x1b7c83, 0x6e7781,
+                0x57606a, 0xa40e26, 0x1a7f37, 0x633c01, 0x218bff, 0xa475f9, 0x3192aa, 0x8c959f,
+            ]
+        ),
+        accent: None,
+    },
+    ThemeDef {
+        name: "Solarized Light",
+        palette: palette!(
+            0x657b83,
+            0xfdf6e3,
+            0x586e75,
+            [
+                0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0x93a1a1,
+                0x586e75, 0xcb4b16, 0x859900, 0xb58900, 0x268bd2, 0x6c71c4, 0x2aa198, 0x002b36,
+            ]
+        ),
+        accent: None,
+    },
+    ThemeDef {
+        name: "Gruvbox Light",
+        palette: palette!(
+            0x3c3836,
+            0xfbf1c7,
+            0x3c3836,
+            [
+                0x3c3836, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0x7c6f64,
+                0x928374, 0x9d0006, 0x79740e, 0xb57614, 0x076678, 0x8f3f71, 0x427b58, 0x282828,
+            ]
+        ),
+        accent: Some(0x076678),
+    },
 ];
 
 pub fn find(name: &str) -> &'static ThemeDef {
@@ -243,6 +414,55 @@ pub fn derive(def: &ThemeDef) -> Colors {
 
 static CURRENT: RwLock<Option<Colors>> = RwLock::new(None);
 
+// ---------------------------------------------------------------------------
+// 見た目の設定（透明度・行の高さ）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+struct Look {
+    opacity: f32,
+    line_height: f32,
+}
+
+static LOOK: RwLock<Look> = RwLock::new(Look {
+    opacity: 1.0,
+    line_height: DEFAULT_LINE_HEIGHT,
+});
+
+/// 背景の不透明度（1.0 = 透過しない）
+pub fn opacity() -> f32 {
+    LOOK.read().unwrap().opacity
+}
+
+/// 背景を透過しているか
+pub fn translucent() -> bool {
+    opacity() < 0.999
+}
+
+pub fn set_opacity(v: f32) {
+    LOOK.write().unwrap().opacity = v.clamp(0.2, 1.0);
+}
+
+/// ターミナルの行の高さ（文字サイズに対する倍率）
+pub fn line_height() -> f32 {
+    LOOK.read().unwrap().line_height
+}
+
+pub fn set_line_height(v: f32) {
+    LOOK.write().unwrap().line_height = v.clamp(1.0, 2.0);
+}
+
+/// 背景用の色（透明度の設定を反映）。サイドバー・タブの行・ターミナルの背景に使う
+pub fn bg(c: u32) -> Hsla {
+    Rgba {
+        r: ((c >> 16) & 0xff) as f32 / 255.0,
+        g: ((c >> 8) & 0xff) as f32 / 255.0,
+        b: (c & 0xff) as f32 / 255.0,
+        a: opacity(),
+    }
+    .into()
+}
+
 /// 今のテーマの UI 色
 pub fn th() -> Colors {
     if let Some(c) = *CURRENT.read().unwrap() {
@@ -271,6 +491,14 @@ mod tests {
         assert!(derive(find("One Light")).is_light);
         assert!(!derive(find("tokyo night")).is_light);
         assert_eq!(find("存在しない").name, "wimux");
+        assert!(derive(find("GitHub Light")).is_light);
+        assert!(derive(find("Solarized Light")).is_light);
+        // 名前の重複がないこと
+        for (i, a) in THEMES.iter().enumerate() {
+            for b in &THEMES[i + 1..] {
+                assert!(!a.name.eq_ignore_ascii_case(b.name));
+            }
+        }
     }
 
     #[test]

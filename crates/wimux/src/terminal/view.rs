@@ -125,6 +125,11 @@ impl TerminalView {
         self.pending_commands.extend(commands);
     }
 
+    /// 設定（カーソルの形など）を反映する
+    pub fn apply_config(&self) {
+        self.terminal.apply_config();
+    }
+
     /// フォントを変える（設定画面）。None なら自動
     pub fn set_font_family(&mut self, family: Option<&str>, cx: &App) {
         self.font = pick_font(cx, family);
@@ -535,6 +540,8 @@ impl Render for TerminalView {
         let palette = super::colors::current();
         let selection_color = crate::theme::th().selection;
         let background = to_hsla(palette.background);
+        // 透過中は背景を塗らない（区画の枠が透明度つきで塗る）
+        let paint_bg = !crate::theme::translucent();
 
         let terminal_canvas = canvas(
             move |bounds, window, _cx| {
@@ -545,7 +552,7 @@ impl Render for TerminalView {
                     .advance(font_id, font_size, 'm')
                     .map(|s| s.width)
                     .unwrap_or(font_size * 0.6);
-                let cell_height = (font_size * crate::theme::LINE_HEIGHT).round();
+                let cell_height = (font_size * crate::theme::line_height()).round();
                 let metrics = CellMetrics {
                     width: cell_width,
                     height: cell_height,
@@ -777,7 +784,9 @@ impl Render for TerminalView {
                 }
             },
             move |bounds, prepared, window, cx| {
-                window.paint_quad(fill(bounds, prepared.background));
+                if paint_bg {
+                    window.paint_quad(fill(bounds, prepared.background));
+                }
                 for (rect, color) in &prepared.rects {
                     window.paint_quad(fill(*rect, *color));
                 }
@@ -833,7 +842,7 @@ impl Render for TerminalView {
             .pl(px(10.))
             .pr(px(6.))
             .pt(px(6.))
-            .bg(background)
+            .when(paint_bg, |el| el.bg(background))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_left_down))
