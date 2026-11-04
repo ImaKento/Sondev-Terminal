@@ -1217,7 +1217,13 @@ impl WimuxWindow {
     }
 
     /// 分割の境界のドラッグ中: マウスの位置から比率を決める
-    fn on_divider_drag(&mut self, path: &[bool], axis: Axis, ev: &DragMoveEvent<DraggedDivider>, cx: &mut Context<Self>) {
+    fn on_divider_drag(
+        &mut self,
+        path: &[bool],
+        axis: Axis,
+        ev: &DragMoveEvent<DraggedDivider>,
+        cx: &mut Context<Self>,
+    ) {
         // どの分割の容器にも届くので、つかんだ境界の分割だけを動かす
         if ev.drag(cx).path != path {
             return;
@@ -2847,9 +2853,8 @@ impl WimuxWindow {
         .into_iter()
         .enumerate()
         .map(|(i, (b, label))| {
-            chip(("backdrop", i).into(), label.to_string(), backdrop == b).on_click(
-                cx.listener(move |this, _, window, cx| this.set_backdrop(b, window, cx)),
-            )
+            chip(("backdrop", i).into(), label.to_string(), backdrop == b)
+                .on_click(cx.listener(move |this, _, window, cx| this.set_backdrop(b, window, cx)))
         });
 
         // 行の高さ
@@ -2858,10 +2863,14 @@ impl WimuxWindow {
             .into_iter()
             .enumerate()
             .map(|(i, v)| {
-                chip(("line-height", i).into(), format!("{v}"), (line_height - v).abs() < 0.001)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_line_height(v, window, cx)
-                    }))
+                chip(
+                    ("line-height", i).into(),
+                    format!("{v}"),
+                    (line_height - v).abs() < 0.001,
+                )
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.set_line_height(v, window, cx)),
+                )
             });
 
         // カーソルの形
@@ -2874,9 +2883,8 @@ impl WimuxWindow {
         .into_iter()
         .enumerate()
         .map(|(i, (k, label))| {
-            chip(("cursor", i).into(), label.to_string(), cursor == k).on_click(
-                cx.listener(move |this, _, window, cx| this.set_cursor(k, window, cx)),
-            )
+            chip(("cursor", i).into(), label.to_string(), cursor == k)
+                .on_click(cx.listener(move |this, _, window, cx| this.set_cursor(k, window, cx)))
         });
 
         let step_button = |id: &'static str, label: &'static str| {
@@ -3279,11 +3287,12 @@ impl WimuxWindow {
                 .cursor_pointer()
                 .text_size(px(UI_TAB))
                 .when(active, |el| {
-                    el.bg(theme::bg(th().term_bg)).text_color(rgb(if focused_group {
-                        th().text
-                    } else {
-                        th().text_dim
-                    }))
+                    el.bg(theme::bg(th().term_bg))
+                        .text_color(rgb(if focused_group {
+                            th().text
+                        } else {
+                            th().text_dim
+                        }))
                 })
                 .when(!active, |el| {
                     el.text_color(rgb(th().text_faint))
@@ -3634,15 +3643,19 @@ impl WimuxWindow {
                 first_path.push(false);
                 let mut second_path = path.clone();
                 second_path.push(true);
-                let first_el = self.render_node(first, first_path, focused_group, rects, window, cx);
-                let second_el = self.render_node(second, second_path, focused_group, rects, window, cx);
+                let first_el =
+                    self.render_node(first, first_path, focused_group, rects, window, cx);
+                let second_el =
+                    self.render_node(second, second_path, focused_group, rects, window, cx);
                 let horizontal = *axis == Axis::Horizontal;
                 let axis = *axis;
                 // 境界をつかむところ（線は 1px だが、つかめる幅は広げる）。区画より上に重ねる
                 const GRIP: f32 = 7.;
                 let handle_id: SharedString = format!(
                     "divider-{}",
-                    path.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>()
+                    path.iter()
+                        .map(|b| if *b { '1' } else { '0' })
+                        .collect::<String>()
                 )
                 .into();
                 let handle = div()
@@ -3698,9 +3711,11 @@ impl WimuxWindow {
                     .min_h_0()
                     .when(horizontal, |el| el.flex_row())
                     .when(!horizontal, |el| el.flex_col())
-                    .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedDivider>, _, cx| {
-                        this.on_divider_drag(&path, axis, ev, cx);
-                    }))
+                    .on_drag_move(cx.listener(
+                        move |this, ev: &DragMoveEvent<DraggedDivider>, _, cx| {
+                            this.on_divider_drag(&path, axis, ev, cx);
+                        },
+                    ))
                     .child(first_box)
                     .child(divider)
                     .child(second_box)
