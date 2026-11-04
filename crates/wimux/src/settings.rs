@@ -5,9 +5,15 @@ use serde::{Deserialize, Serialize};
 use crate::session;
 use crate::theme::{DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT};
 
+/// 設定ファイルの版。古い版の値は `load` で今の版に直す
+const VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// 設定ファイルの版（無ければ 0 = 最初の版）
+    #[serde(default)]
+    pub version: u32,
     /// テーマ名（theme.rs の THEMES）
     pub theme: String,
     /// ターミナルのフォント（None なら自動: JetBrains Mono → Cascadia Mono → …）
@@ -43,11 +49,11 @@ pub enum CursorKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Backdrop {
-    /// そのまま透ける
+    /// そのまま透ける（後ろのウィンドウがそのまま見える）
     Transparent,
-    /// 後ろをぼかす（すりガラス）
+    /// 後ろをぼかす（すりガラス。Windows のアクリル効果なので、後ろはぼやけて白っぽく見える）
     Blur,
-    /// Windows 11 の Mica
+    /// Windows 11 の Mica（後ろのウィンドウではなく、壁紙の色がうっすら出る）
     Mica,
     /// Windows 11 の Mica Alt
     MicaAlt,
@@ -59,13 +65,14 @@ pub const CDP_PORT: u16 = 9222;
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            version: VERSION,
             theme: "wimux".into(),
             font_family: None,
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
             cursor: CursorKind::Block,
             opacity: 1.0,
-            backdrop: Backdrop::Blur,
+            backdrop: Backdrop::Transparent,
             restore_claude: true,
             browser_cdp: false,
             editor: None,
@@ -80,8 +87,21 @@ fn path() -> std::path::PathBuf {
 pub fn load() -> Settings {
     std::fs::read_to_string(path())
         .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
+        .and_then(|t| parse(&t))
         .unwrap_or_default()
+}
+
+fn parse(text: &str) -> Option<Settings> {
+    let mut s: Settings = serde_json::from_str(text).ok()?;
+    if s.version < 1 {
+        // 版 0 は透過の既定が「すりガラス」だった。後ろのウィンドウが見えず白っぽくなるだけなので、
+        // 選び直していない人は「そのまま透かす」にする
+        if s.backdrop == Backdrop::Blur {
+            s.backdrop = Backdrop::Transparent;
+        }
+        s.version = 1;
+    }
+    Some(s)
 }
 
 pub fn save(s: &Settings) {
@@ -95,7 +115,19 @@ pub fn save(s: &Settings) {
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{Backdrop, Settings, parse};
+
+    #[test]
+    fn old_blur_default_becomes_transparent() {
+        let s = parse(r#"{"opacity":0.8,"backdrop":"blur"}"#).unwrap();
+        assert_eq!(s.backdrop, Backdrop::Transparent);
+        assert_eq!(s.version, 1);
+        // 今の版で選んだ「すりガラス」はそのまま
+        let s = parse(r#"{"version":1,"opacity":0.8,"backdrop":"blur"}"#).unwrap();
+        assert_eq!(s.backdrop, Backdrop::Blur);
+        // 新しく作った設定は「そのまま透かす」
+        assert_eq!(Settings::default().backdrop, Backdrop::Transparent);
+    }
 
     #[test]
     fn missing_fields_use_defaults() {

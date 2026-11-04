@@ -251,6 +251,13 @@ struct DraggedTab {
     label: String,
 }
 
+/// ドラッグ中のワークスペース（サイドバーで並べ替え）
+#[derive(Clone)]
+struct DraggedWorkspace {
+    index: usize,
+    label: String,
+}
+
 /// ドラッグ中にマウスについてくる表示
 struct TabDragPreview {
     label: String,
@@ -764,6 +771,27 @@ impl WimuxWindow {
         let gid = self.alloc_group(None);
         self.workspaces.push(Workspace::new(gid));
         self.select_workspace(self.workspaces.len() - 1, window, cx);
+    }
+
+    /// ワークスペースの並べ替え: `from` 番目を `to` 番目へ（表示中のワークスペースは変えない）
+    fn move_workspace(
+        &mut self,
+        from: usize,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let n = self.workspaces.len();
+        if from >= n || to >= n || from == to {
+            return;
+        }
+        let ws = self.workspaces.remove(from);
+        self.workspaces.insert(to, ws);
+        self.active = moved_index(self.active, from, to);
+        self.ws_menu = None;
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     fn next_workspace(&mut self, _: &NextWorkspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -1480,7 +1508,9 @@ impl WimuxWindow {
     fn sync_browsers(&mut self, visible: &[PaneId], window: &mut Window, cx: &mut Context<Self>) {
         // ポップアップを開いている間・タブをドラッグしている間はブラウザを隠す
         // （ブラウザは別ウィンドウなので、上に予告を描けず、落とすこともできないため）
-        let show: Vec<PaneId> = if self.overlay_open() || cx.has_active_drag() {
+        // 境界のドラッグ（区画の大きさの変更）中は隠さない。隠すと描画のたびに
+        // 「隠す → 表示」を繰り返してチカチカする
+        let show: Vec<PaneId> = if self.overlay_open() || self.tab_dragging(cx) {
             Vec::new()
         } else {
             visible.to_vec()
@@ -2467,7 +2497,8 @@ impl WimuxWindow {
                 .flex_col()
                 .gap(px(3.))
                 .px(px(10.))
-                .py(px(8.))
+                // 上下の 2px は並べ替えの印（透明な枠）の分
+                .py(px(6.))
                 .rounded(px(8.))
                 .cursor_pointer()
                 .when(selected, |el| el.bg(rgb(th().selected_bg)))
@@ -2476,6 +2507,35 @@ impl WimuxWindow {
                 .drag_over::<DraggedTab>(|s, _, _, _| s.bg(rgb(th().hover_bg_strong)))
                 .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
                     this.move_tab(d.pane, TabDest::Workspace(i), window, cx);
+                }))
+                // ワークスペースをドラッグして並べ替え（落とした位置に入る）
+                .on_drag(
+                    DraggedWorkspace {
+                        index: i,
+                        label: name.clone(),
+                    },
+                    |d, _, _, cx| {
+                        cx.new(|_| TabDragPreview {
+                            label: d.label.clone(),
+                        })
+                    },
+                )
+                .border_color(gpui_kit::transparent_black())
+                .border_t_2()
+                .border_b_2()
+                .drag_over::<DraggedWorkspace>(move |s, d, _, _| {
+                    let accent = rgb(th().accent);
+                    // 入る側の辺だけに線を出す（反対側の枠は消し、そのぶん余白を足して高さを保つ）
+                    if d.index < i {
+                        s.border_color(accent).border_t_0().pt(px(8.))
+                    } else if d.index > i {
+                        s.border_color(accent).border_b_0().pb(px(8.))
+                    } else {
+                        s
+                    }
+                })
+                .on_drop(cx.listener(move |this, d: &DraggedWorkspace, window, cx| {
+                    this.move_workspace(d.index, i, window, cx);
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
@@ -2631,6 +2691,11 @@ impl WimuxWindow {
                     // 一覧の空いているところにタブを落とすと、新しいワークスペースになる
                     .on_drop(cx.listener(|this, d: &DraggedTab, window, cx| {
                         this.move_tab(d.pane, TabDest::NewWorkspace, window, cx);
+                    }))
+                    // ワークスペースを一覧の空いているところに落とすと、いちばん下へ
+                    .on_drop(cx.listener(|this, d: &DraggedWorkspace, window, cx| {
+                        let last = this.workspaces.len().saturating_sub(1);
+                        this.move_workspace(d.index, last, window, cx);
                     }))
                     .flex_1()
                     .min_h_0()
@@ -2845,8 +2910,8 @@ impl WimuxWindow {
             });
         let backdrop = self.settings.backdrop;
         let backdrop_chips = [
-            (Backdrop::Blur, "すりガラス（ぼかし）"),
             (Backdrop::Transparent, "そのまま透かす"),
+            (Backdrop::Blur, "すりガラス（ぼかす）"),
             (Backdrop::Mica, "Mica"),
             (Backdrop::MicaAlt, "Mica Alt"),
         ]
@@ -3040,7 +3105,7 @@ impl WimuxWindow {
                         )
                     })
                     .child(hint(
-                        "ターミナル・サイドバー・タブの行の背景を透かします。Mica / Mica Alt は Windows 11 のみ",
+                        "ターミナル・サイドバー・タブの行の背景を透かします。後ろのウィンドウが見えるのは「そのまま透かす」だけです（すりガラスは後ろをぼかし、Mica / Mica Alt は壁紙の色だけが出ます。Mica は Windows 11 のみ）",
                     ))
                     .child(section("フォント"))
                     .child(div().flex().flex_wrap().gap(px(6.)).children(font_chips))
@@ -3216,6 +3281,26 @@ impl WimuxWindow {
                             }),
                         ),
                     )
+                    .when(index > 0, |el| {
+                        el.child(
+                            item("ws-menu-up", "上へ移動", th().text).on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.ws_menu = None;
+                                    this.move_workspace(index, index - 1, window, cx);
+                                },
+                            )),
+                        )
+                    })
+                    .when(index + 1 < self.workspaces.len(), |el| {
+                        el.child(
+                            item("ws-menu-down", "下へ移動", th().text).on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.ws_menu = None;
+                                    this.move_workspace(index, index + 1, window, cx);
+                                },
+                            )),
+                        )
+                    })
                     .child(div().my(px(3.)).h(px(1.)).bg(rgb(th().panel_border)))
                     .child(item("ws-menu-delete", "削除", DANGER).on_click(cx.listener(
                         move |this, _, window, cx| {
@@ -3466,7 +3551,7 @@ impl WimuxWindow {
     }
 
     /// ブラウザのタブ: 操作バー＋ WebView を重ねる領域
-    fn render_browser(&self, id: PaneId) -> AnyElement {
+    fn render_browser(&self, id: PaneId, cx: &App) -> AnyElement {
         let c = th();
         let pane = &self.panes[&id];
         let url_field = pane.url_field.clone();
@@ -3474,7 +3559,8 @@ impl WimuxWindow {
         let loading = pane.loading;
         let browser = pane.browser.clone();
         let error = pane.browser_error.clone();
-        let show = !self.overlay_open();
+        // sync_browsers と同じ条件にする（違うと 1 フレームごとに隠す・表示を繰り返してチカチカする）
+        let show = !self.overlay_open() && !self.tab_dragging(cx);
 
         let nav_button =
             |key: &'static str, label: &'static str, b: Option<Rc<Browser>>, f: fn(&Browser)| {
@@ -3597,7 +3683,7 @@ impl WimuxWindow {
                     .filter(|p| p.attention)
                     .and_then(|p| pane_dot(p.state, true));
                 let browser_el = match (pane_id, pane) {
-                    (Some(id), Some(p)) if p.is_browser() => Some(self.render_browser(id)),
+                    (Some(id), Some(p)) if p.is_browser() => Some(self.render_browser(id, cx)),
                     _ => None,
                 };
                 div()
@@ -3915,6 +4001,19 @@ fn apply_backdrop(s: &Settings, window: &Window) {
     window.set_background_appearance(appearance);
 }
 
+/// 並べ替え（`from` 番目を `to` 番目へ移動）の後に、もとの `index` 番目が何番目になるか
+fn moved_index(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < index && index <= to {
+        index - 1
+    } else if to <= index && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
+
 pub fn custom_titlebar() -> bool {
     cfg!(windows) || std::env::var("WIMUX_CUSTOM_TITLEBAR").is_ok_and(|v| v == "1")
 }
@@ -3941,7 +4040,20 @@ fn restore_claude_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentState, claude_state_from_title, folder_name};
+    use super::{AgentState, claude_state_from_title, folder_name, moved_index};
+
+    #[test]
+    fn reorder_keeps_active() {
+        // [a b c d] で 0 → 2: [b c a d]
+        assert_eq!(moved_index(0, 0, 2), 2);
+        assert_eq!(moved_index(1, 0, 2), 0);
+        assert_eq!(moved_index(2, 0, 2), 1);
+        assert_eq!(moved_index(3, 0, 2), 3);
+        // 3 → 1: [a d b c]
+        assert_eq!(moved_index(3, 3, 1), 1);
+        assert_eq!(moved_index(1, 3, 1), 2);
+        assert_eq!(moved_index(0, 3, 1), 0);
+    }
 
     #[test]
     fn claude_title_detection() {
