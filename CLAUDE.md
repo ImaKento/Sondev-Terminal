@@ -55,7 +55,7 @@ wimux/
 - `%APPDATA%\wimux\session.json` … ワークスペース・分割・区画ごとのタブ・ペインごとの cwd / conda / Claude 起動状態（v2。v1 は読み込み時に変換）
 - `%APPDATA%\wimux\dirs.json` … フォルダ履歴（初回は zoxide の履歴を取り込む）
 - `%APPDATA%\wimux\dirs.txt` … シェルの `cdi` が読むフォルダ一覧（よく行く順。wimux が保存のたびに書き出す）
-- `%APPDATA%\wimux\settings.json` … 設定画面の内容
+- `%APPDATA%\wimux\settings.json` … 設定画面の内容（テーマ・フォント・文字サイズ・行の高さ・カーソル・透過など）
 
 ## 配布（インストーラー）
 
@@ -141,6 +141,8 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
 ## 見た目（cmux / herdr を参考）
 
 - テーマは `theme.rs` の `THEMES`（ターミナルの 16 色＋前景・背景だけを定義）。UI の色は `derive()` で自動生成し、コードからは `th().text` のように参照する。テーマを足すときは `THEMES` に 1 件追加するだけでよい
+- 背景の透過: 設定の `opacity`（1.0 = 透過なし）と `backdrop`（ぼかし / 透かす / Mica / Mica Alt）。`window.rs` の `apply_backdrop` で `WindowBackgroundAppearance` を切り替え、背景は `theme::bg()` で透明度つきで塗る。重ね塗りで濃くならないよう、透過中はルートとターミナル本体（`view.rs`）は背景を塗らず、サイドバー・タブの行・区画の枠だけが塗る
+- 行の高さ（`theme::line_height()`）とカーソルの形（`terminal::set_default_cursor` → alacritty の `default_cursor_style`）も設定画面から変更できる
 - 今のターミナル配色は `terminal::colors::current()`（PTY の読み取りスレッドからも参照するためグローバル）
 - 文字サイズ: ターミナル 13（Ghostty / cmux の既定）、UI 13 / タブ 12.5 / 補足 11.5
 - プロンプト: 標準の `PS パス>` のときは git のブランチ名を `PS C:\repo (main)>` のように表示（.git/HEAD を直接読むので速い。`$env:WIMUX_GIT_PROMPT = "0"` で無効）

@@ -130,7 +130,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     ]
 }
 
-use crate::settings::{self, Settings};
+use crate::settings::{self, Backdrop, CursorKind, Settings};
 use crate::terminal::view::installed_fonts;
 use crate::theme::{self, *};
 
@@ -379,6 +379,10 @@ impl WimuxWindow {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = settings::load();
         theme::apply(&settings.theme);
+        theme::set_opacity(settings.opacity);
+        theme::set_line_height(settings.line_height);
+        crate::terminal::set_default_cursor(settings.cursor);
+        apply_backdrop(&settings, window);
         let (browser_tx, browser_rx) = flume::unbounded::<(PaneId, BrowserMsg)>();
         let mut this = Self {
             workspaces: Vec::new(),
@@ -1476,6 +1480,51 @@ impl WimuxWindow {
         cx.notify();
     }
 
+    /// ターミナルを含めて描き直す
+    fn refresh_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for pane in self.panes.values() {
+            if let Some(view) = &pane.view {
+                view.update(cx, |_, cx| cx.notify());
+            }
+        }
+        window.refresh();
+        cx.notify();
+    }
+
+    fn set_opacity(&mut self, v: f32, window: &mut Window, cx: &mut Context<Self>) {
+        theme::set_opacity(v);
+        self.settings.opacity = theme::opacity();
+        apply_backdrop(&self.settings, window);
+        settings::save(&self.settings);
+        self.refresh_all(window, cx);
+    }
+
+    fn set_backdrop(&mut self, b: Backdrop, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.backdrop = b;
+        apply_backdrop(&self.settings, window);
+        settings::save(&self.settings);
+        self.refresh_all(window, cx);
+    }
+
+    fn set_line_height(&mut self, v: f32, window: &mut Window, cx: &mut Context<Self>) {
+        theme::set_line_height(v);
+        self.settings.line_height = theme::line_height();
+        settings::save(&self.settings);
+        self.refresh_all(window, cx);
+    }
+
+    fn set_cursor(&mut self, kind: CursorKind, window: &mut Window, cx: &mut Context<Self>) {
+        crate::terminal::set_default_cursor(kind);
+        self.settings.cursor = kind;
+        settings::save(&self.settings);
+        for pane in self.panes.values() {
+            if let Some(view) = &pane.view {
+                view.update(cx, |v, _| v.apply_config());
+            }
+        }
+        self.refresh_all(window, cx);
+    }
+
     fn set_font_family(&mut self, family: Option<String>, cx: &mut Context<Self>) {
         self.settings.font_family = family.clone();
         settings::save(&self.settings);
@@ -2184,7 +2233,7 @@ impl WimuxWindow {
             .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
-            .bg(rgb(th().chrome_bg))
+            .bg(theme::bg(th().chrome_bg))
             .child(
                 div()
                     .flex()
@@ -2399,6 +2448,90 @@ impl WimuxWindow {
                 .child(label)
         });
 
+        // 選択肢のチップ（透明度・行の高さ・カーソルなど）
+        let chip = |id: ElementId, label: String, selected: bool| {
+            div()
+                .id(id)
+                .px(px(10.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(UI_SMALL))
+                .when(selected, |el| {
+                    el.bg(rgb(c.selected_bg)).text_color(rgb(0xffffff))
+                })
+                .when(!selected, |el| {
+                    el.bg(rgb(c.hover_bg))
+                        .text_color(rgb(c.text))
+                        .hover(|s| s.bg(rgb(c.hover_bg_strong)))
+                })
+                .child(label)
+        };
+        let hint = |text: &'static str| {
+            div()
+                .pt(px(6.))
+                .text_size(px(11.))
+                .text_color(rgb(c.text_faint))
+                .child(text)
+        };
+
+        // 背景の透過
+        let opacity = self.settings.opacity;
+        let opacity_chips = [1.0f32, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.6, 0.5]
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let label = if v >= 0.999 {
+                    "なし".to_string()
+                } else {
+                    format!("{}%", (v * 100.).round() as i32)
+                };
+                chip(("opacity", i).into(), label, (opacity - v).abs() < 0.001).on_click(
+                    cx.listener(move |this, _, window, cx| this.set_opacity(v, window, cx)),
+                )
+            });
+        let backdrop = self.settings.backdrop;
+        let backdrop_chips = [
+            (Backdrop::Blur, "すりガラス（ぼかし）"),
+            (Backdrop::Transparent, "そのまま透かす"),
+            (Backdrop::Mica, "Mica"),
+            (Backdrop::MicaAlt, "Mica Alt"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (b, label))| {
+            chip(("backdrop", i).into(), label.to_string(), backdrop == b).on_click(
+                cx.listener(move |this, _, window, cx| this.set_backdrop(b, window, cx)),
+            )
+        });
+
+        // 行の高さ
+        let line_height = self.settings.line_height;
+        let line_height_chips = [1.0f32, 1.1, 1.2, 1.25, 1.3, 1.4, 1.5, 1.6]
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                chip(("line-height", i).into(), format!("{v}"), (line_height - v).abs() < 0.001)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_line_height(v, window, cx)
+                    }))
+            });
+
+        // カーソルの形
+        let cursor = self.settings.cursor;
+        let cursor_chips = [
+            (CursorKind::Block, "█ ブロック"),
+            (CursorKind::Beam, "▏ 縦線"),
+            (CursorKind::Underline, "▁ 下線"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (k, label))| {
+            chip(("cursor", i).into(), label.to_string(), cursor == k).on_click(
+                cx.listener(move |this, _, window, cx| this.set_cursor(k, window, cx)),
+            )
+        });
+
         let step_button = |id: &'static str, label: &'static str| {
             div()
                 .id(id)
@@ -2539,6 +2672,21 @@ impl WimuxWindow {
                     .pb(px(20.))
                     .child(section("テーマ"))
                     .child(div().flex().flex_wrap().gap(px(10.)).children(theme_cards))
+                    .child(section("背景の透過"))
+                    .child(div().flex().flex_wrap().gap(px(6.)).children(opacity_chips))
+                    .when(opacity < 0.999, |el| {
+                        el.child(
+                            div()
+                                .pt(px(10.))
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(6.))
+                                .children(backdrop_chips),
+                        )
+                    })
+                    .child(hint(
+                        "ターミナル・サイドバー・タブの行の背景を透かします。Mica / Mica Alt は Windows 11 のみ",
+                    ))
                     .child(section("フォント"))
                     .child(div().flex().flex_wrap().gap(px(6.)).children(font_chips))
                     .child(
@@ -2578,6 +2726,11 @@ impl WimuxWindow {
                                     .child("Ctrl+= / Ctrl+- / Ctrl+0 でも変更できます"),
                             ),
                     )
+                    .child(section("行の高さ"))
+                    .child(div().flex().flex_wrap().gap(px(6.)).children(line_height_chips))
+                    .child(section("カーソル"))
+                    .child(div().flex().flex_wrap().gap(px(6.)).children(cursor_chips))
+                    .child(hint("vim の挿入モードなど、アプリが形を指定したときはそちらが優先されます"))
                     .child(section("ブラウザ"))
                     .child(
                         div()
@@ -2781,7 +2934,7 @@ impl WimuxWindow {
                 .cursor_pointer()
                 .text_size(px(UI_TAB))
                 .when(active, |el| {
-                    el.bg(rgb(th().term_bg)).text_color(rgb(if focused_group {
+                    el.bg(theme::bg(th().term_bg)).text_color(rgb(if focused_group {
                         th().text
                     } else {
                         th().text_dim
@@ -2862,7 +3015,7 @@ impl WimuxWindow {
             .h(px(TAB_BAR_HEIGHT))
             .pl(px(4.))
             .when(!(edge.top_right && custom_titlebar()), |el| el.pr(px(4.)))
-            .bg(rgb(th().chrome_bg))
+            .bg(theme::bg(th().chrome_bg))
             .child(
                 div()
                     .id(("tabs-scroll", gid))
@@ -2989,7 +3142,6 @@ impl WimuxWindow {
             .gap(px(2.))
             .h(px(36.))
             .px(px(6.))
-            .bg(rgb(c.term_bg))
             .border_b_1()
             .border_color(rgb(c.divider))
             .child(nav_button("web-back", "←", browser.clone(), Browser::back))
@@ -3024,7 +3176,6 @@ impl WimuxWindow {
             .flex_1()
             .min_h_0()
             .relative()
-            .bg(rgb(c.term_bg))
             .child(
                 div()
                     .absolute()
@@ -3106,9 +3257,12 @@ impl WimuxWindow {
                             .flex_1()
                             .min_h_0()
                             .overflow_hidden()
-                            .bg(rgb(th().term_bg))
+                            .bg(theme::bg(th().term_bg))
                             .border_2()
-                            .border_color(rgb(attention.unwrap_or(th().term_bg)))
+                            .border_color(match attention {
+                                Some(a) => rgb(a).into(),
+                                None => transparent_black(),
+                            })
                             .when_some(view, |el, v| el.child(v))
                             .when_some(browser_el, |el, b| el.child(b))
                             .when(self.tab_dragging(cx), |el| {
@@ -3272,7 +3426,8 @@ impl Render for WimuxWindow {
             .flex()
             .flex_row()
             .size_full()
-            .bg(rgb(th().chrome_bg))
+            // 透過中は各部分（サイドバー・タブの行・区画）が透明度つきで塗る（重ね塗りで濃くならないよう）
+            .when(!theme::translucent(), |el| el.bg(rgb(th().chrome_bg)))
             .text_color(rgb(th().text))
             .text_size(px(UI_TEXT))
             .when(self.sidebar_visible, |el| el.child(self.render_sidebar(cx)))
@@ -3372,6 +3527,21 @@ fn git_branch(cwd: &str) -> Option<String> {
 }
 
 /// 独自タイトルバー（OS のタイトルバーを消して、タブの行に統合する）を使うか
+/// ウィンドウの背景の透過・ぼかしを設定に合わせる
+fn apply_backdrop(s: &Settings, window: &Window) {
+    let appearance = if s.opacity >= 0.999 {
+        WindowBackgroundAppearance::Opaque
+    } else {
+        match s.backdrop {
+            Backdrop::Transparent => WindowBackgroundAppearance::Transparent,
+            Backdrop::Blur => WindowBackgroundAppearance::Blurred,
+            Backdrop::Mica => WindowBackgroundAppearance::MicaBackdrop,
+            Backdrop::MicaAlt => WindowBackgroundAppearance::MicaAltBackdrop,
+        }
+    };
+    window.set_background_appearance(appearance);
+}
+
 pub fn custom_titlebar() -> bool {
     cfg!(windows) || std::env::var("WIMUX_CUSTOM_TITLEBAR").is_ok_and(|v| v == "1")
 }
