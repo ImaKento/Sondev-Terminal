@@ -8419,6 +8419,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
+ "webview2-com",
  "windows-sys 0.61.2",
  "winresource",
  "wry",

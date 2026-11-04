@@ -1508,6 +1508,19 @@ impl WimuxWindow {
             BrowserMsg::Loading(l) => pane.loading = l,
             // 新しいタブを開くのは上（受信側）で処理する
             BrowserMsg::NewWindow(_) => {}
+            // ブラウザをクリックした: その区画・タブをアクティブにする（タブの青い線を移す）
+            BrowserMsg::Focused => {
+                pane.attention = false;
+                if let Some((wi, gid, ti)) = self.locate(id)
+                    && wi == self.active
+                {
+                    self.workspaces[wi].focused = gid;
+                    if let Some(group) = self.groups.get_mut(&gid) {
+                        group.active = ti;
+                    }
+                    self.schedule_save(cx);
+                }
+            }
             BrowserMsg::Url(u) => {
                 if u.is_empty() || u == "about:blank" {
                     return;

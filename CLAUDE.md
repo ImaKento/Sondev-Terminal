@@ -232,6 +232,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] 見えない区画・別ワークスペース・ポップアップ表示中は `set_visible(false)` で隠す（子ウィンドウは GPUI の上に重なるため）
 - [x] 設定で「AI からブラウザを操作」を ON にすると `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`（再起動後に反映）
 - [ ] Windows での動作確認（Linux はブラウザペイン非対応）
+- [x] ブラウザをクリックしたら、その区画・タブをアクティブにする（WebView2 の GotFocus → `BrowserMsg::Focused`。クリックは別ウィンドウに行くので GPUI には届かない）
 - [ ] ブラウザにフォーカスがある間は wimux のキー操作が効かない。必要なら WebView 側でキーを拾って転送する
 
 ## 既知の注意点
@@ -248,4 +249,4 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - ブラウザ（別ウィンドウ）を隠す条件は `sync_browsers` と `render_browser` で必ず揃える。ずれると描画のたびに「隠す → 表示」を繰り返してチカチカする。境界のドラッグ（`resizing`）中は隠さず、タブ・ワークスペースのドラッグ中だけ隠す（`tab_dragging`）
 - WebView2 の作成中は Windows のメッセージループが回る。GPUI の処理の途中（render や action の中）で作ると GPUI が二重に呼ばれて壊れるので、`sync_browsers` では生のウィンドウハンドルだけを持って非同期タスクの中で作っている
 - GPUI（Windows）は DirectComposition の描画を子ウィンドウより **上** に重ねる（`CreateTargetForHwnd(hwnd, true)`）ため、WebView2 を子ウィンドウにすると隠れて見えない。そこで `browser.rs` の `host::HostWindow`（メインウィンドウに所有された枠なしウィンドウ）に WebView2 を入れ、区画の位置（画面座標）に重ねている。メインウィンドウを動かしたときは window.rs の 30ms タイマーで `reposition` して追従させる
-- Windows 専用コードは Linux でも型チェックできる: `RUSTFLAGS="--cfg wimux_check" cargo check`
+- Windows 専用コードは Linux でも型チェックできる: `RUSTFLAGS="--cfg wimux_check" cargo check`。`rustup target add x86_64-pc-windows-msvc` すれば `cargo check --target x86_64-pc-windows-msvc` で Windows 向けそのものも型チェックできる（リンクはしない）
