@@ -39,12 +39,17 @@ wimux/
 │  ├─ text_field.rs           # 1 行の入力欄（ブラウザの URL 欄）。IME・貼り付け対応
 │  ├─ picker.rs               # ポップアップ（cdi のフォルダ選択・名前入力）。IME 対応
 │  ├─ notify.rs               # Windows トースト通知（PowerShell 経由）
+│  ├─ ipc.rs                  # ペイン内のフック・`sondev notify` から本体へ知らせる口（127.0.0.1 の TCP ＋トークン）
+│  ├─ hooks.rs                # Claude Code のフック / Codex の notify / `sondev notify` → エージェントの状態
+│  ├─ claude_session.rs       # Claude Code のフック設定（--settings）と、ペインごとのセッション ID の記録
+│  ├─ open.rs                 # Ctrl+クリックで URL・ファイルを外のアプリ（ブラウザ・エディタ）で開く
 │  ├─ theme.rs                # テーマ（ターミナル配色）と、そこから作る UI 色・文字サイズ・寸法
-│  ├─ settings.rs             # settings.json（テーマ・フォント・文字サイズ・Claude 自動再開）
+│  ├─ settings.rs             # settings.json（テーマ・フォント・文字サイズ・Claude 自動再開・エディタ）
 │  └─ terminal/
 │     ├─ mod.rs               # Terminal: PTY 起動、reader / wait スレッド、リサイズ、問い合わせ応答
 │     ├─ view.rs              # TerminalView: 描画・キー入力・IME・選択/コピー・スクロール・貼り付け
 │     ├─ keys.rs              # キー → エスケープシーケンス / win32-input-mode
+│     ├─ links.rs             # 文字列から URL・ファイルパス（:行:列）を見つける
 │     ├─ osc.rs               # OSC スキャナ（cwd / UserVar / 通知）
 │     └─ colors.rs            # パレット・色解決
 └─ shell-integration/
@@ -69,6 +74,11 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 ```
 
 → `dist\SondevTerminal-setup-<version>.exe`。バージョンはルートの `Cargo.toml` の `[workspace.package] version`。
+
+**リリース（GitHub Actions）**: Actions → Release → Run workflow でバージョン（例 `0.2.0`）を入れるか、`git tag v0.2.0 && git push origin v0.2.0`。
+Windows ランナーでインストーラーを作り、GitHub Releases に置く（バージョンはタグから決めるので Cargo.toml を上げるコミットは不要）。
+
+**CI**: PR は Linux で fmt・test・`--cfg wimux_check` の型チェックだけ（軽い）。main へのマージで Windows のリリースビルドとインストーラー作成まで行い、Actions の成果物に残す。
 
 - `installer/wimux.iss` … Inno Setup の設定。管理者権限なしで `%LOCALAPPDATA%\Programs\wimux` に入る。`AppId` は変えない（アップデートの判定に使う）
 - `crates/wimux/build.rs` … exe にアイコン（`assets/wimux.ico`、リソース ID 1）とバージョン情報を埋め込む
@@ -102,6 +112,11 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 | Ctrl+, | 設定画面（サイドバー右下の「⚙ 設定」でも可） |
 | Ctrl+Shift+O | フォーカス中の区画に空のブラウザのタブを開く（URL 欄に入力して Enter） |
 | `web [URL / ポート / 検索語]` | シェルから、同じ区画に新しいブラウザのタブを開く（引数なしなら空のタブ。`web 3000` → localhost:3000） |
+| Ctrl+Shift+F | スクロールバックを検索（Enter / ↑ で上へ、Shift+Enter / ↓ で下へ、Esc で閉じる。大文字を含まなければ大文字・小文字を区別しない） |
+| Ctrl+クリック | URL を既定のブラウザで、ファイルパス（`src/a.rs:12:3` など）をエディタで、フォルダをエクスプローラーで開く。Ctrl を押すと下線が出る |
+| Ctrl+Shift+クリック | URL をアプリ内のブラウザのタブで開く |
+| Ctrl+Shift+U | 入力待ち（許可・質問）→ 完了して未確認 → そのほかの通知 の順に、次のペインへ移動（押すたびに巡回） |
+| `sondev notify [--title 題] 本文` | シェルから通知を出す（`cargo build; sondev notify ビルド完了` など） |
 
 キー割り当ては `window.rs` の `key_bindings()`。ターミナル（`TerminalView::on_key_down`）より先にキー割り当てが処理される。
 
@@ -114,6 +129,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 | `WIMUX_WIN32_INPUT=0` | win32-input-mode を使わない（キー入力の不具合切り分け用） |
 | `WIMUX_PTY_LOG=<path>` | PTY の生出力をファイルに記録（デバッグ用） |
 | `WIMUX_CONDA_ROOT` | conda の場所（自動検出できないとき） |
+| `WIMUX_IPC` / `WIMUX_EXE` | （wimux がペインに渡す）フック・`sondev notify` の送り先と、sondev.exe の場所 |
 
 ## ビルド・実行（Windows）
 
@@ -141,7 +157,12 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
 - 今のターミナル配色は `terminal::colors::current()`（PTY の読み取りスレッドからも参照するためグローバル）
 - 文字サイズ: ターミナル 13（Ghostty / cmux の既定）、UI 13 / タブ 12.5 / 補足 11.5
 - プロンプト: 標準の `PS パス>` のときは git のブランチ名を `PS C:\repo (main)>` のように表示（.git/HEAD を直接読むので速い。`$env:WIMUX_GIT_PROMPT = "0"` で無効）
-- Claude Code の状態の丸（タブ・サイドバー）: 黄=実行中、赤=入力待ち（許可・質問で停止。ベル / 通知で検知）、緑=完了して未確認、灰=確認済みで待機、青=その他の通知。見ていない区画は同じ色の枠で囲み、未読数のバッジも同じ色
+- エージェントの状態の丸（タブ・サイドバー）: 黄=実行中、赤=入力待ち（許可・質問で停止）、緑=完了して未確認、灰=確認済みで待機、青=その他の通知。見ていない区画は同じ色の枠で囲み、未読数のバッジも同じ色
+- エージェントの状態の取り方（`window.rs` の `AgentState`）:
+  - Claude Code: シェル連携の `claude` 関数から起動すると、フック（SessionStart / UserPromptSubmit / PostToolUse / Notification / Stop / SessionEnd）が `sondev.exe --claude-hook` を呼び、`ipc.rs` 経由で本体に届く。フックが無いとき（直接 claude.exe を実行など）はタイトル・ベル・OSC 通知から推定
+  - Codex / Gemini / Aider / OpenCode / Copilot など: シェル連携のラッパー関数が起動時に `WIMUX_AGENT` を送り、出力の動き（2 秒止まったら待機中）で推定。ベル・OSC 9 / 777 の通知は入力待ち。Codex は `-c notify=[sondev.exe, --codex-notify]` を付けて起動し、応答の完了を正確に受け取る（config.toml に notify があればそちらを優先）
+  - 入力待ちのあとにキーを押したら「作業中」に戻す
+- ファイルを開くエディタは settings.json の `editor`（例: `"code -g {file}:{line}:{col}"`）。未設定なら VS Code → Cursor → Windsurf → 既定のアプリ
 - Claude Code の再開: シェル連携の `claude` 関数が `--settings claude-hook-settings.json` を付けて起動し、SessionStart フック（`sondev.exe --claude-hook`）がペインごとのセッション ID を `claude-sessions\<WIMUX_PANE_ID>` に書く。保存時に読んで session.json に記録し、次回は `claude --resume <ID>`（ID が無ければ `--continue`）
 - conda の再開: base も含めて `conda activate` する（conda は遅延初期化なので base も自動では有効にならない）
 - URL 欄（text_field.rs）: カーソル移動・選択・コピー/切り取り/貼り付け・マウス選択に対応。GPUI の examples/input.rs と同じく自前で描画
@@ -175,6 +196,8 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] タブバー・分割（左右 / 上下）・Alt+矢印でペイン移動
 - [x] 表示されるまでシェルを起動しない（遅延起動）
 - [x] 文字選択とコピー（ドラッグ、ダブルクリックで単語、トリプルクリックで行）
+- [x] スクロールバック検索（Ctrl+Shift+F）
+- [x] URL・ファイルパスの Ctrl+クリック（OSC 8 のリンクにも対応）
 - [ ] 分割境界のドラッグでサイズ変更
 - [ ] 設定ファイル（`%APPDATA%\wimux\config.toml`: フォント、サイズ、配色、シェル、キー割り当て）
 - [ ] タブのドラッグ並べ替え、ワークスペースの並べ替え
@@ -189,7 +212,10 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] 実行中 → 入力待ちになったら通知（見えていないワークスペースは未読バッジ、ウィンドウが裏ならトースト）
 - [x] OSC 9 / 777 の通知も同じ扱い（Claude Code の `preferredNotifChannel` を `iterm2` などにすると届く）
 - [ ] トースト通知の Windows での動作確認
-- [ ] `wimux notify` CLI（名前付きパイプ）＋ Claude Code hooks 連携（hooks の出力は端末に出ないため）
+- [x] `sondev notify` CLI ＋ Claude Code hooks 連携（127.0.0.1 の TCP ＋トークン。hooks の出力は端末に出ないため）
+- [x] Claude 以外のエージェント（Codex・Gemini・Aider など）の状態表示と完了通知
+- [x] 入力待ちのペインへ移動（Ctrl+Shift+U）
+- [ ] git worktree 連携（ブランチごとのワークスペース作成・差分・PR・片付け）
 - [ ] ワークスペース単位で Claude 自動再開の ON/OFF
 
 ### Phase 4: ブラウザペイン（実装済み・Windows 未確認）
