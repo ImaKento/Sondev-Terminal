@@ -97,12 +97,13 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | Ctrl+Shift+R | ワークスペース名の変更（サイドバーのダブルクリック、右クリックメニューでも可） |
 | サイドバーで右クリック | 名前を変更 / 新しいワークスペース / 上へ移動 / 下へ移動 / 削除 |
 | サイドバーのワークスペースをドラッグ | 並べ替え（落としたワークスペースの位置に入る。一覧の空きに落とすといちばん下） |
-| Ctrl+Shift+T | フォーカス中の区画に新しいタブ（今のフォルダで開く） |
+| Ctrl+T / Ctrl+Shift+T | フォーカス中の区画に新しいタブ（今のフォルダで開く） |
 | Ctrl+] / Ctrl+[（Ctrl+Tab / Ctrl+Shift+Tab） | 区画内の次 / 前のタブ |
 | Ctrl+D / Ctrl+Shift+D | 区画を右に分割 / 下に分割（Ctrl+Shift+E も下に分割。各区画のタブ行の ◫ ⊟ でも可） |
 | Ctrl+矢印 / Alt+矢印 | 区画間の移動 |
 | Alt+Shift+矢印 | 分割の境界をその方向へ動かす（5% ずつ）。境界の線をマウスでドラッグしても変えられる |
-| Ctrl+Shift+W | タブを閉じる（最後のタブなら区画も閉じる） |
+| Ctrl+W / Ctrl+Shift+W | タブを閉じる（最後のタブなら区画も閉じる） |
+| Ctrl+Shift+L | 右に分割して、新しい区画を空のブラウザにする（URL 欄に入力して Enter）。ブラウザのタブを見ているときは、その URL 欄へ |
 | Ctrl+Shift+G / `cdi [キーワード]` | フォルダ履歴からターミナル内で選んで移動（fzf を使う。PATH になければインストーラー同梱の fzf.exe、それもなければ内蔵の選択画面） |
 | Ctrl+C | 文字を選択中ならコピー、そうでなければ ^C（中断） |
 | Ctrl+V | クリップボードに文字があれば貼り付け。画像だけ（スクショなど）のときは、Claude Code には Alt+V（画像の貼り付け）を送り、それ以外のアプリには Ctrl+V をそのまま送る |
@@ -122,7 +123,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | `sondev notify [--title 題] 本文` | シェルから通知を出す（`cargo build; sondev notify ビルド完了` など） |
 
 キー割り当ては `window.rs` の `key_bindings()`。ターミナル（`TerminalView::on_key_down`）より先にキー割り当てが処理される。
-そのため Ctrl+D（EOF）・Ctrl+[（Esc と同じ）・Ctrl+←→（PSReadLine の単語移動）はシェルには届かない。
+そのため Ctrl+D（EOF）・Ctrl+[（Esc と同じ）・Ctrl+←→（PSReadLine の単語移動）・Ctrl+T・Ctrl+W（単語の削除）はシェルやアプリ（Claude Code の Ctrl+T など）には届かない。
 
 ## 環境変数
 

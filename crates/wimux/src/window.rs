@@ -58,6 +58,7 @@ gpui_kit::actions!(
         OpenSettings,
         OpenBrowser,
         JumpToAttention,
+        SplitBrowser,
     ]
 );
 
@@ -74,6 +75,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-shift-pageup", PrevWorkspace, c),
         KeyBinding::new("ctrl-shift-r", RenameWorkspace, c),
         KeyBinding::new("ctrl-shift-t", NewTab, c),
+        KeyBinding::new("ctrl-t", NewTab, c),
+        KeyBinding::new("ctrl-w", ClosePane, c),
+        KeyBinding::new("ctrl-shift-l", SplitBrowser, c),
         KeyBinding::new("ctrl-tab", NextTab, c),
         KeyBinding::new("ctrl-shift-tab", PrevTab, c),
         KeyBinding::new("ctrl-]", NextTab, c),
@@ -971,6 +975,33 @@ impl WimuxWindow {
         }
         self.focus_active(window, cx);
         self.schedule_save(cx);
+    }
+
+    /// Ctrl+Shift+L: 右に分割して、新しい区画を空のブラウザにする（URL 欄にカーソル）。
+    /// ブラウザのタブを見ているときは、分割せずにその URL 欄へ（ブラウザの Ctrl+L と同じ使い方）
+    fn split_browser(&mut self, _: &SplitBrowser, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.focused_pane()
+            && self.panes.get(&id).is_some_and(|p| p.is_browser())
+        {
+            self.focus_url_field(id, window, cx);
+            return;
+        }
+        let Some(target) = self.focused_group() else {
+            return;
+        };
+        let pane = self.alloc_id();
+        self.panes.insert(pane, Pane::new_browser(String::new()));
+        let gid = self.alloc_id();
+        self.groups.insert(gid, Group::new(pane));
+        if let Some(ws) = self.workspaces.get_mut(self.active)
+            && ws.root.split(target, gid, Axis::Horizontal)
+        {
+            ws.focused = gid;
+        }
+        self.focus_handle.focus(window, cx);
+        self.focus_url_field(pane, window, cx);
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     fn split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
@@ -3881,6 +3912,7 @@ impl Render for WimuxWindow {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_browser))
             .on_action(cx.listener(Self::jump_to_attention))
+            .on_action(cx.listener(Self::split_browser))
             .relative()
             .flex()
             .flex_row()
