@@ -59,10 +59,18 @@ fn main() {
             }),
             ..Default::default()
         };
-        gpui_kit::open_window(options, cx, |window, cx| {
+        let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| window::WimuxWindow::new(window, cx))
         })
         .expect("ウィンドウを開けませんでした");
+        // gpui-kit の Root は、いちばん下に gpui-component のテーマの背景（既定のライトテーマでは白）を塗る。
+        // 透過したときに後ろが白く濁るので、Root の背景は透明にする（色は wimux 側で塗る）
+        let _ = handle.update(cx, |_, window, cx| {
+            gpui_kit::base::Root::update(window, cx, |root, _, cx| {
+                root.style().background = Some(gpui_kit::transparent_black().into());
+                cx.notify();
+            });
+        });
 
         // 最後のウィンドウを閉じたら終了
         cx.on_window_closed(|cx, _| {

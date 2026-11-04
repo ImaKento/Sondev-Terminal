@@ -158,7 +158,7 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
 ## 見た目（cmux / herdr を参考）
 
 - テーマは `theme.rs` の `THEMES`（ターミナルの 16 色＋前景・背景だけを定義）。UI の色は `derive()` で自動生成し、コードからは `th().text` のように参照する。テーマを足すときは `THEMES` に 1 件追加するだけでよい
-- 背景の透過: 設定の `opacity`（1.0 = 透過なし）と `backdrop`（透かす / ぼかし / Mica / Mica Alt。既定は透かす）。後ろのウィンドウが見えるのは「透かす」だけ（ぼかしは Windows のアクリル効果で白っぽくぼやけ、Mica は壁紙の色だけが出る）。settings.json の `version` が 0 の「ぼかし」は読み込み時に「透かす」に直す。`window.rs` の `apply_backdrop` で `WindowBackgroundAppearance` を切り替え、背景は `theme::bg()` で透明度つきで塗る。重ね塗りで濃くならないよう、透過中はルートとターミナル本体（`view.rs`）は背景を塗らず、サイドバー・タブの行・区画の枠だけが塗る
+- 背景の透過: 設定の `opacity`（1.0 = 透過なし）と `backdrop`（透かす / ぼかし / Mica / Mica Alt。既定は透かす）。後ろのウィンドウが見えるのは「透かす」だけ（ぼかしは Windows のアクリル効果で白っぽくぼやけ、Mica は壁紙の色だけが出る）。settings.json の `version` が 0 の「ぼかし」は読み込み時に「透かす」に直す。`window.rs` の `apply_backdrop` で `WindowBackgroundAppearance` を切り替え、背景は `theme::bg()` で透明度つきで塗る。重ね塗りで濃くならないよう、透過中はルートとターミナル本体（`view.rs`）は背景を塗らず、サイドバー・タブの行・区画の枠だけが塗る。gpui-kit の Root（gpui-component）はいちばん下にテーマの背景（既定のライトテーマでは白）を塗るので、`main.rs` で Root の背景を透明にしている（これが無いと透過が白く濁るだけになる）
 - 行の高さ（`theme::line_height()`）とカーソルの形（`terminal::set_default_cursor` → alacritty の `default_cursor_style`）も設定画面から変更できる
 - 今のターミナル配色は `terminal::colors::current()`（PTY の読み取りスレッドからも参照するためグローバル）
 - 文字サイズ: ターミナル 13（Ghostty / cmux の既定）、UI 13 / タブ 12.5 / 補足 11.5
