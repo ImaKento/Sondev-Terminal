@@ -7,6 +7,7 @@
 
 pub mod colors;
 pub mod keys;
+pub mod links;
 pub mod osc;
 pub mod view;
 
@@ -118,9 +119,15 @@ pub struct Shared {
     /// ConPTY が win32-input-mode (`CSI ? 9001 h`) を要求しているか
     win32_input: AtomicBool,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// 最後にサイズが変わった時刻（リサイズによる再描画を「出力」と区別するため）
+    resized_at: Mutex<Option<std::time::Instant>>,
 }
 
 impl Shared {
+    pub fn resized_at(&self) -> Option<std::time::Instant> {
+        *self.resized_at.lock().unwrap()
+    }
+
     pub fn win32_input(&self) -> bool {
         self.win32_input.load(Ordering::Relaxed)
     }
@@ -146,6 +153,7 @@ impl Shared {
             }
             *size = new;
         }
+        *self.resized_at.lock().unwrap() = Some(std::time::Instant::now());
         *self.window_size.lock().unwrap() = WindowSize {
             num_lines: new.rows,
             num_cols: new.cols,
@@ -228,6 +236,13 @@ impl Terminal {
         cmd.env("TERM_PROGRAM", "wimux");
         cmd.env("WIMUX", "1");
         cmd.env("WIMUX_PANE_ID", &opts.pane_id);
+        // フック・`sondev notify` が本体へ知らせを送る先
+        if let Some(ipc) = crate::ipc::env_value() {
+            cmd.env("WIMUX_IPC", ipc);
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            cmd.env("WIMUX_EXE", exe);
+        }
         // 同梱の fzf.exe などを探す場所（exe と同じフォルダ）
         if let Some(dir) = std::env::current_exe()
             .ok()
@@ -273,6 +288,7 @@ impl Terminal {
             window_size,
             win32_input: AtomicBool::new(false),
             killer: Mutex::new(killer),
+            resized_at: Mutex::new(None),
         });
 
         // reader スレッド

@@ -9,6 +9,9 @@
 //! 2. セッションが始まる（起動・再開・/clear）たびに `sondev.exe --claude-hook` が呼ばれる
 //! 3. 標準入力の JSON から session_id を取り出し、`claude-sessions\<WIMUX_PANE_ID>` に書く
 //! 4. wimux は保存のたびにそのファイルを読み、session.json に記録する
+//!
+//! 同じフックで、作業開始・入力待ち・完了・終了も本体へ送る（ipc.rs / hooks.rs）。
+//! タイトルやベルからの推定より確実に、サイドバーの丸と通知を出せる。
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -41,19 +44,39 @@ pub fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// `sondev.exe --claude-hook`: Claude Code の SessionStart フックとして呼ばれる
+/// `sondev.exe --claude-hook`: Claude Code のフックとして呼ばれる。
+/// 標準入力の JSON を読み、セッション ID を記録して、状態の変化を本体へ送る
 pub fn run_hook() {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&input) else {
+        return;
+    };
+    let event = v.get("hook_event_name").and_then(|e| e.as_str());
+    // 古いフック設定（SessionStart だけ）は hook_event_name を見ずに呼ばれていた
+    if matches!(event, None | Some("SessionStart")) {
+        record_session(&v);
+    }
+    if let Some((event, message)) = crate::hooks::claude_event(&v) {
+        crate::ipc::send(crate::ipc::Message::Agent {
+            agent: "claude".into(),
+            event,
+            message,
+        });
+    }
+}
+
+/// フックの入力からセッション ID を取り出し、ペインごとのファイルに書く
+fn record_session(v: &serde_json::Value) {
     let Ok(key) = std::env::var("WIMUX_PANE_ID") else {
         return;
     };
     if !valid_id(&key) {
         return;
     }
-    let Some(id) = serde_json::from_str::<serde_json::Value>(&input)
-        .ok()
-        .and_then(|v| v.get("session_id")?.as_str().map(str::to_string))
+    let Some(id) = v
+        .get("session_id")
+        .and_then(|s| s.as_str())
         .filter(|id| valid_id(id))
     else {
         return;
@@ -66,14 +89,24 @@ pub fn write_hook_settings() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // Windows の Claude Code は Git Bash でフックを動かすことがあるので、/ 区切りにしておく
     let exe = exe.to_string_lossy().replace('\\', "/");
+    // セッション ID の記録（SessionStart）と、状態の通知（作業開始・入力待ち・完了・終了）。
+    // PostToolUse は許可したツールが終わった合図（入力待ち → 作業中に戻す）。
+    // PreToolUse は許可の確認より前に呼ばれ、入力待ちの判定に役立たないので使わない
+    let hook = serde_json::json!([{
+        "hooks": [{
+            "type": "command",
+            "command": format!("\"{exe}\" --claude-hook"),
+            "timeout": 5,
+        }]
+    }]);
     let settings = serde_json::json!({
         "hooks": {
-            "SessionStart": [{
-                "hooks": [{
-                    "type": "command",
-                    "command": format!("\"{exe}\" --claude-hook"),
-                }]
-            }]
+            "SessionStart": hook,
+            "UserPromptSubmit": hook,
+            "PostToolUse": hook,
+            "Notification": hook,
+            "Stop": hook,
+            "SessionEnd": hook,
         }
     });
     let path = session::config_dir().join("claude-hook-settings.json");

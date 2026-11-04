@@ -26,6 +26,9 @@ pub struct Settings {
     /// AI（Playwright / Chrome DevTools MCP など）からブラウザを操作できるようにする。
     /// 有効にすると 127.0.0.1:9222 で操作用の口が開く（変更は再起動後に反映）
     pub browser_cdp: bool,
+    /// Ctrl+クリックでファイルを開くエディタ（`{file}` `{line}` `{col}` を置き換える）。
+    /// 例: `code -g {file}:{line}:{col}`。None なら VS Code → Cursor → 既定のアプリの順に探す
+    pub editor: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +68,7 @@ impl Default for Settings {
             backdrop: Backdrop::Blur,
             restore_claude: true,
             browser_cdp: false,
+            editor: None,
         }
     }
 }

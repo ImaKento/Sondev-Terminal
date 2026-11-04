@@ -18,8 +18,12 @@ use crate::theme::*;
 pub enum TextFieldEvent {
     /// Enter で確定
     Submit(String),
+    /// Shift+Enter（検索欄で「前へ」に使う）
+    SubmitBack,
     /// Esc で取り消し
     Cancel,
+    /// 文字列が変わった（検索欄の逐次検索に使う）
+    Changed,
 }
 
 pub struct TextField {
@@ -216,7 +220,15 @@ impl TextField {
         }
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.text.clone();
+        self.handle_key(ev, window, cx);
+        if self.text != before {
+            cx.emit(TextFieldEvent::Changed);
+        }
+    }
+
+    fn handle_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.marked.is_some() {
             return;
         }
@@ -236,7 +248,12 @@ impl TextField {
         match ks.key.as_str() {
             "enter" => {
                 self.edited = false;
-                cx.emit(TextFieldEvent::Submit(self.text.trim().to_string()));
+                let text = self.text.trim().to_string();
+                cx.emit(if shift {
+                    TextFieldEvent::SubmitBack
+                } else {
+                    TextFieldEvent::Submit(text)
+                });
             }
             "escape" => {
                 self.edited = false;
@@ -666,6 +683,7 @@ impl EntityInputHandler for TextField {
             self.marked = None;
         }
         self.replace_selection(text);
+        cx.emit(TextFieldEvent::Changed);
         cx.notify();
     }
 
@@ -692,6 +710,7 @@ impl EntityInputHandler for TextField {
             })
             .unwrap_or(r.start + new_text.len()..r.start + new_text.len());
         self.reversed = false;
+        cx.emit(TextFieldEvent::Changed);
         cx.notify();
     }
 

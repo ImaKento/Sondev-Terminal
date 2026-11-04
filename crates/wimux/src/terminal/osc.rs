@@ -150,7 +150,7 @@ fn parse_osc(payload: &str) -> Option<ShellEvent> {
 }
 
 /// `file://host/C:/Users/x` → `C:\Users\x`、`file://host/home/x` → `/home/x`
-fn parse_file_url(url: &str) -> Option<String> {
+pub fn parse_file_url(url: &str) -> Option<String> {
     let rest = url.strip_prefix("file://")?;
     let path = &rest[rest.find('/')?..];
     let decoded = percent_decode(path);
