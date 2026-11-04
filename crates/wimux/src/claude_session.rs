@@ -122,15 +122,14 @@ pub fn write_hook_settings() -> Option<PathBuf> {
 /// これがあれば `claude mcp add` を手でしなくても、Sondev のペインで起動した Claude は
 /// どのプロジェクトでも Sondev のブラウザ（127.0.0.1:9222）を操作できる
 pub fn write_mcp_config(browser_cdp: bool) {
+    // 前回までのブラウザ操作の作業記録（ページのスナップショット・コンソールのログ）は使わないので消す
+    let _ = std::fs::remove_dir_all(playwright_output_dir());
     let path = mcp_config_path();
     if !(browser_cdp && crate::browser::SUPPORTED) {
         let _ = std::fs::remove_file(&path);
         return;
     }
-    let config = mcp_config(
-        crate::settings::CDP_PORT,
-        &session::config_dir().join("playwright-mcp"),
-    );
+    let config = mcp_config(crate::settings::CDP_PORT, &playwright_output_dir());
     let Ok(bytes) = serde_json::to_vec_pretty(&config) else {
         return;
     };
@@ -145,6 +144,11 @@ pub fn write_mcp_config(browser_cdp: bool) {
 pub fn mcp_config_file() -> Option<PathBuf> {
     let path = mcp_config_path();
     path.is_file().then_some(path)
+}
+
+/// Playwright MCP の作業記録の置き場所（起動のたびに空にする）
+fn playwright_output_dir() -> PathBuf {
+    session::config_dir().join("playwright-mcp")
 }
 
 fn mcp_config_path() -> PathBuf {
