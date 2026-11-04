@@ -1,10 +1,11 @@
 # CI
 #
-# - PR: Linux だけで軽く確認（フォーマット・テスト・Windows 専用コードの型チェック）
-# - main へのマージ（push）: 上に加えて Windows でリリースビルド → インストーラーを作り、成果物として残す
+# - PR・main へのマージ（push）: Linux だけで軽く確認（フォーマット・テスト・Windows 専用コードの型チェック）
+# - 手動実行（Actions → CI → Run workflow）: 上に加えて Windows でリリースビルド → インストーラーを作り、成果物として残す
 #
-# private リポジトリは Windows ランナーの分数が Linux の 2 倍かかるので、PR では Windows を動かさない。
-# Windows で確かめたい PR は、Actions の画面から「Run workflow」でブランチを選んで手動実行できる。
+# Windows のビルドは 1 回 20 分ほどかかり、private リポジトリでは Windows ランナーの分数が 2 倍で数えられる
+# （1 回 ≒ 40 分ぶん）。無料枠を使い切らないよう、自動では動かさず手動にしている。
+# 配るときは Release ワークフロー（手動 / タグ）を使う。
 
 name: CI
 
@@ -57,8 +58,8 @@ jobs:
 
   windows:
     name: Windows（リリースビルド・インストーラー）
-    # PR では動かさない（main へのマージと手動実行のときだけ）
-    if: github.event_name != 'pull_request'
+    # 手動実行のときだけ（Actions → CI → Run workflow。ブランチも選べる）
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 90
     steps:

@@ -32,6 +32,6 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 GitHub の Actions → **Release** → Run workflow でバージョン（例: `0.2.0`）を入れて実行すると、インストーラーを作って Releases に置きます。
 タグを push しても同じです: `git tag v0.2.0 && git push origin v0.2.0`
 
-main にマージするたびに作られるインストーラーは、Actions の各実行の「Artifacts」からも取れます。
+リリースにせず試しにインストーラーだけ作りたいときは、Actions → **CI** → Run workflow（ブランチを選べます）。できたものは、その実行の「Artifacts」から取れます。
 
 開発方針・ロードマップは [CLAUDE.md](CLAUDE.md) を参照。
