@@ -50,6 +50,10 @@ pub enum BrowserMsg {
     /// （ブラウザは別ウィンドウなので、GPUI にはクリックが届かない）
     #[cfg_attr(not(windows), allow(dead_code))]
     Focused,
+    /// ブラウザで wimux のキー（Ctrl+T など、"ctrl-t" の形）が押された。
+    /// ブラウザは別ウィンドウなので、キーは GPUI に届かない
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Key(String),
 }
 
 pub type BrowserSender = flume::Sender<(PaneId, BrowserMsg)>;
@@ -103,7 +107,9 @@ impl Browser {
             })
             .build_as_child(&host)?;
         #[cfg(windows)]
-        watch_focus(&webview, id, tx_focus);
+        watch_focus(&webview, id, tx_focus.clone());
+        #[cfg(windows)]
+        forward_keys(&webview, id, tx_focus);
         Ok(Self {
             webview,
             host,
@@ -201,6 +207,89 @@ fn watch_focus(webview: &WebView, id: PaneId, tx: BrowserSender) {
     if let Err(e) = unsafe { controller.add_GotFocus(&handler, &mut token) } {
         log::warn!("ブラウザのフォーカスの通知を登録できませんでした: {e}");
     }
+}
+
+/// ブラウザで押された wimux のキー（Ctrl+T・Ctrl+W・Ctrl+Tab など）を wimux に回す。
+/// 回したキーはブラウザには渡さない（Ctrl+C / Ctrl+V などブラウザで使うキーは回さない。keymap.rs）
+#[cfg(windows)]
+fn forward_keys(webview: &WebView, id: PaneId, tx: BrowserSender) {
+    use webview2_com::AcceleratorKeyPressedEventHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+        COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+    };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
+    };
+    use wry::WebViewExtWindows as _;
+    let controller = webview.controller();
+    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
+        let mut vk = 0u32;
+        // SAFETY: WebView2 が渡した有効な引数
+        unsafe {
+            args.KeyEventKind(&mut kind)?;
+            args.VirtualKey(&mut vk)?;
+        }
+        if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+            && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+        {
+            return Ok(());
+        }
+        // SAFETY: 引数のない Win32 API
+        let down = |vk: u16| unsafe { GetKeyState(vk as i32) } < 0;
+        let Some(key) = keystroke(vk, down(VK_CONTROL), down(VK_MENU), down(VK_SHIFT)) else {
+            return Ok(());
+        };
+        if crate::keymap::forwarded_action(&key).is_some() {
+            // SAFETY: 同上
+            unsafe { args.SetHandled(true)? };
+            let _ = tx.send((id, BrowserMsg::Key(key)));
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    // SAFETY: 有効なコントローラーとハンドラー。ハンドラーは WebView と一緒に破棄される
+    if let Err(e) = unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) } {
+        log::warn!("ブラウザのキーの転送を登録できませんでした: {e}");
+    }
+}
+
+/// 仮想キーコードと修飾キー → keymap.rs のキーの書き方（"ctrl-shift-t"）
+#[cfg_attr(not(windows), allow(dead_code))]
+fn keystroke(vk: u32, ctrl: bool, alt: bool, shift: bool) -> Option<String> {
+    let key: String = match vk {
+        0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk)?.to_ascii_lowercase().to_string(),
+        0x70..=0x7B => format!("f{}", vk - 0x6F),
+        0x09 => "tab".into(),
+        0x21 => "pageup".into(),
+        0x22 => "pagedown".into(),
+        0x25 => "left".into(),
+        0x26 => "up".into(),
+        0x27 => "right".into(),
+        0x28 => "down".into(),
+        0xBB => "=".into(), // VK_OEM_PLUS（= / + のキー）
+        0xBC => ",".into(), // VK_OEM_COMMA
+        0xBD => "-".into(), // VK_OEM_MINUS
+        0xDB => "[".into(), // VK_OEM_4
+        0xDD => "]".into(), // VK_OEM_6
+        0x6B => "+".into(), // テンキーの +
+        0x6D => "-".into(), // テンキーの -
+        _ => return None,
+    };
+    let mut s = String::new();
+    if ctrl {
+        s.push_str("ctrl-");
+    }
+    if alt {
+        s.push_str("alt-");
+    }
+    if shift {
+        s.push_str("shift-");
+    }
+    s.push_str(&key);
+    Some(s)
 }
 
 /// WebView2 を入れる、メインウィンドウに所有された枠なしウィンドウ
@@ -448,7 +537,32 @@ pub fn short_label(title: Option<&str>, url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_url, short_label};
+    use super::{keystroke, normalize_url, short_label};
+
+    #[test]
+    fn keystrokes() {
+        assert_eq!(
+            keystroke(0x54, true, false, false).as_deref(),
+            Some("ctrl-t")
+        );
+        assert_eq!(
+            keystroke(0x09, true, false, true).as_deref(),
+            Some("ctrl-shift-tab")
+        );
+        assert_eq!(
+            keystroke(0xDD, true, false, false).as_deref(),
+            Some("ctrl-]")
+        );
+        assert_eq!(
+            keystroke(0x31, true, false, false).as_deref(),
+            Some("ctrl-1")
+        );
+        assert_eq!(
+            keystroke(0x25, false, true, true).as_deref(),
+            Some("alt-shift-left")
+        );
+        assert_eq!(keystroke(0x10, true, false, false), None);
+    }
 
     #[test]
     fn urls() {

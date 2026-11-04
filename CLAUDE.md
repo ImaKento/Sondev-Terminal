@@ -31,6 +31,7 @@ wimux/
 ├─ Cargo.toml                 # ワークスペース
 ├─ crates/wimux/src/
 │  ├─ main.rs                 # アプリ起動・キー割り当て登録
+│  ├─ keymap.rs               # コマンドの表（キー割り当て・コマンドパレット・ブラウザから回すキー）と settings.json の keybindings
 │  ├─ window.rs               # WimuxWindow: サイドバー・タブバー・分割表示・操作（アクション）・保存復元・通知
 │  ├─ workspace.rs            # ワークスペース → 分割ツリー → 区画（タブの並び）のモデル（UI 非依存・テストあり）
 │  ├─ session.rs              # session.json の形式と読み書き
@@ -93,6 +94,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 
 | キー | 動作 |
 |---|---|
+| Ctrl+Shift+P | コマンドパレット（コマンドを名前で検索して実行。今のキーも表示） |
 | Ctrl+Shift+N | 新しいワークスペース |
 | Ctrl+Shift+PageDown / PageUp | 次 / 前のワークスペース |
 | Ctrl+1〜8 / Ctrl+9 | 1〜8 番目 / 最後のワークスペース |
@@ -124,7 +126,14 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | Ctrl+Shift+U | 入力待ち（許可・質問）→ 完了して未確認 → そのほかの通知 の順に、次のペインへ移動（押すたびに巡回） |
 | `sondev notify [--title 題] 本文` | シェルから通知を出す（`cargo build; sondev notify ビルド完了` など） |
 
-キー割り当ては `window.rs` の `key_bindings()`。ターミナル（`TerminalView::on_key_down`）より先にキー割り当てが処理される。
+キー割り当ては `keymap.rs` の `COMMANDS`（コマンド id・表示名・既定のキー）。ターミナル（`TerminalView::on_key_down`）より先にキー割り当てが処理される。
+settings.json の `keybindings` で変えられる（キー → コマンド id。空文字列なら既定の割り当てを外す。再起動後に反映）:
+
+```json
+"keybindings": { "ctrl-w": "", "ctrl-alt-w": "close_tab" }
+```
+
+ブラウザ（WebView2）にフォーカスがあるときは、wimux のキー（Ctrl / Alt 付きのもの）を WebView2 の AcceleratorKeyPressed で拾って wimux に回す（`browser.rs` の `forward_keys` → `BrowserMsg::Key`）。Ctrl+C / Ctrl+V / Ctrl+F など、ブラウザで使うキーは回さない（`keymap.rs` の `BROWSER_KEYS`）。
 そのため Ctrl+D（EOF）・Ctrl+[（Esc と同じ）・Ctrl+←→（PSReadLine の単語移動）・Ctrl+T・Ctrl+W（単語の削除）はシェルやアプリ（Claude Code の Ctrl+T など）には届かない。
 
 ## 環境変数
@@ -209,7 +218,8 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] スクロールバック検索（Ctrl+Shift+F）
 - [x] URL・ファイルパスの Ctrl+クリック（OSC 8 のリンクにも対応）
 - [x] 分割境界のドラッグでサイズ変更（`DraggedDivider`。比率は session.json に保存）・Alt+Shift+矢印
-- [ ] 設定ファイル（`%APPDATA%\wimux\config.toml`: フォント、サイズ、配色、シェル、キー割り当て）
+- [x] キー割り当ての変更（settings.json の `keybindings`）・コマンドパレット（Ctrl+Shift+P）
+- [ ] 設定ファイル（シェルの選択など）
 - [x] タブのドラッグ並べ替え、ワークスペースの並べ替え（サイドバーでドラッグ・右クリックの上へ / 下へ移動）
 
 ### Phase 2: 記憶と復元 ✅
@@ -236,7 +246,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] 設定で「AI からブラウザを操作」を ON にすると `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`（再起動後に反映）
 - [ ] Windows での動作確認（Linux はブラウザペイン非対応）
 - [x] ブラウザをクリックしたら、その区画・タブをアクティブにする（WebView2 の GotFocus → `BrowserMsg::Focused`。クリックは別ウィンドウに行くので GPUI には届かない）
-- [ ] ブラウザにフォーカスがある間は wimux のキー操作が効かない。必要なら WebView 側でキーを拾って転送する
+- [x] ブラウザにフォーカスがある間も wimux のキー操作を効かせる（AcceleratorKeyPressed で拾って転送）
 
 ## 既知の注意点
 

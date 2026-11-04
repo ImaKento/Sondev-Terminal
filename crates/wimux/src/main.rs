@@ -11,6 +11,7 @@ mod claude_session;
 mod dirs;
 mod hooks;
 mod ipc;
+mod keymap;
 mod notify;
 mod open;
 mod picker;
@@ -45,9 +46,14 @@ fn main() {
     let s = settings::load();
     browser::init(s.browser_cdp.then_some(settings::CDP_PORT));
 
-    gpui_kit::application().run(|cx| {
+    let keybindings = s.keybindings.clone();
+    gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        cx.bind_keys(window::key_bindings());
+        // キー割り当て（settings.json の keybindings で変更できる）
+        let keys = keymap::resolve(&keybindings);
+        keymap::set_forwarded(&keys);
+        let bindings = keymap::key_bindings(&keys, cx);
+        cx.bind_keys(bindings);
 
         let options = WindowOptions {
             // 前回閉じたときの位置・大きさ・最大化を復元（初回は最大化）

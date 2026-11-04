@@ -59,87 +59,11 @@ gpui_kit::actions!(
         OpenBrowser,
         JumpToAttention,
         SplitBrowser,
+        CommandPalette,
     ]
 );
 
-const CONTEXT: &str = "Wimux";
-/// TerminalView の key_context と同じ名前
-const TERMINAL_CONTEXT: &str = "Terminal";
-
-/// キー割り当て。Ctrl+Shift 系はシェルやアプリとぶつかりにくいので、主にこちらを使う。
-pub fn key_bindings() -> Vec<KeyBinding> {
-    let c = Some(CONTEXT);
-    vec![
-        KeyBinding::new("ctrl-shift-n", NewWorkspace, c),
-        KeyBinding::new("ctrl-shift-pagedown", NextWorkspace, c),
-        KeyBinding::new("ctrl-shift-pageup", PrevWorkspace, c),
-        KeyBinding::new("ctrl-shift-r", RenameWorkspace, c),
-        KeyBinding::new("ctrl-shift-t", NewTab, c),
-        KeyBinding::new("ctrl-t", NewTab, c),
-        KeyBinding::new("ctrl-w", ClosePane, c),
-        KeyBinding::new("ctrl-shift-l", SplitBrowser, c),
-        KeyBinding::new("ctrl-tab", NextTab, c),
-        KeyBinding::new("ctrl-shift-tab", PrevTab, c),
-        KeyBinding::new("ctrl-]", NextTab, c),
-        KeyBinding::new("ctrl-[", PrevTab, c),
-        KeyBinding::new("ctrl-shift-w", ClosePane, c),
-        // Ctrl+D = 右に分割（左右に並べる）、Ctrl+Shift+D = 下に分割（上下に並べる）
-        KeyBinding::new("ctrl-d", SplitRight, c),
-        KeyBinding::new("ctrl-shift-d", SplitDown, c),
-        KeyBinding::new("ctrl-shift-e", SplitDown, c),
-        KeyBinding::new("ctrl-left", FocusLeft, c),
-        KeyBinding::new("ctrl-right", FocusRight, c),
-        KeyBinding::new("ctrl-up", FocusUp, c),
-        KeyBinding::new("ctrl-down", FocusDown, c),
-        KeyBinding::new("alt-left", FocusLeft, c),
-        KeyBinding::new("alt-right", FocusRight, c),
-        KeyBinding::new("alt-up", FocusUp, c),
-        KeyBinding::new("alt-down", FocusDown, c),
-        // 分割の境界を動かす（Windows Terminal と同じ）
-        KeyBinding::new("alt-shift-left", ResizeLeft, c),
-        KeyBinding::new("alt-shift-right", ResizeRight, c),
-        KeyBinding::new("alt-shift-up", ResizeUp, c),
-        KeyBinding::new("alt-shift-down", ResizeDown, c),
-        KeyBinding::new("ctrl-1", SelectWorkspace1, c),
-        KeyBinding::new("ctrl-2", SelectWorkspace2, c),
-        KeyBinding::new("ctrl-3", SelectWorkspace3, c),
-        KeyBinding::new("ctrl-4", SelectWorkspace4, c),
-        KeyBinding::new("ctrl-5", SelectWorkspace5, c),
-        KeyBinding::new("ctrl-6", SelectWorkspace6, c),
-        KeyBinding::new("ctrl-7", SelectWorkspace7, c),
-        KeyBinding::new("ctrl-8", SelectWorkspace8, c),
-        KeyBinding::new("ctrl-9", SelectWorkspace9, c),
-        KeyBinding::new("ctrl-shift-g", OpenDirPicker, c),
-        KeyBinding::new("ctrl-=", ZoomIn, c),
-        KeyBinding::new("ctrl-+", ZoomIn, c),
-        KeyBinding::new("ctrl-shift-=", ZoomIn, c),
-        KeyBinding::new("ctrl--", ZoomOut, c),
-        KeyBinding::new("ctrl-0", ZoomReset, c),
-        KeyBinding::new("ctrl-shift-b", ToggleSidebar, c),
-        KeyBinding::new("ctrl-,", OpenSettings, c),
-        KeyBinding::new("ctrl-shift-o", OpenBrowser, c),
-        KeyBinding::new("ctrl-shift-u", JumpToAttention, c),
-        KeyBinding::new(
-            "ctrl-shift-f",
-            crate::terminal::view::SearchTerminal,
-            Some(TERMINAL_CONTEXT),
-        ),
-        // gpui-kit の Root は Tab / Shift+Tab（フォーカス移動）と Ctrl+C（コピー）を
-        // 横取りするので、ターミナル内では無効にしてシェルにそのまま届ける
-        KeyBinding::new("tab", NoAction, Some(TERMINAL_CONTEXT)),
-        KeyBinding::new("shift-tab", NoAction, Some(TERMINAL_CONTEXT)),
-        KeyBinding::new("ctrl-c", NoAction, Some(TERMINAL_CONTEXT)),
-        // 入力欄（URL 欄など）でも Ctrl+C などは入力欄自身で処理する
-        KeyBinding::new("ctrl-c", NoAction, Some("TextField")),
-        KeyBinding::new("ctrl-x", NoAction, Some("TextField")),
-        KeyBinding::new("ctrl-a", NoAction, Some("TextField")),
-        KeyBinding::new("ctrl-v", NoAction, Some("TextField")),
-        KeyBinding::new("tab", NoAction, Some("TextField")),
-        // 入力欄では Ctrl+←→ は単語単位のカーソル移動
-        KeyBinding::new("ctrl-left", NoAction, Some("TextField")),
-        KeyBinding::new("ctrl-right", NoAction, Some("TextField")),
-    ]
-}
+use crate::keymap::CONTEXT;
 
 use crate::settings::{self, Backdrop, CursorKind, Settings};
 use crate::terminal::view::installed_fonts;
@@ -409,6 +333,8 @@ impl Pane {
 
 enum PickerTarget {
     Rename(usize),
+    /// コマンドパレット
+    Command,
 }
 
 pub struct WimuxWindow {
@@ -532,10 +458,12 @@ impl WimuxWindow {
                 let alive = this
                     .update_in(cx, |this, window, cx| {
                         for (id, msg) in msgs {
-                            if let BrowserMsg::NewWindow(url) = msg {
-                                this.open_new_window_from(id, url, window, cx);
-                            } else {
-                                this.on_browser_msg(id, msg, cx);
+                            match msg {
+                                BrowserMsg::NewWindow(url) => {
+                                    this.open_new_window_from(id, url, window, cx)
+                                }
+                                BrowserMsg::Key(key) => this.on_browser_key(id, &key, window, cx),
+                                msg => this.on_browser_msg(id, msg, cx),
                             }
                         }
                         cx.notify();
@@ -1024,6 +952,65 @@ impl WimuxWindow {
         }
         self.focus_active(window, cx);
         self.schedule_save(cx);
+    }
+
+    /// Ctrl+Shift+P: コマンドパレット（コマンドを名前で検索して実行）
+    fn command_palette(&mut self, _: &CommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.is_some() {
+            return;
+        }
+        let keys = crate::keymap::resolve(&self.settings.keybindings);
+        let items = keys
+            .keys
+            .iter()
+            .filter(|(c, _)| c.id != "command_palette")
+            .map(|(c, k)| crate::picker::CommandItem {
+                id: c.id.to_string(),
+                label: c.label.to_string(),
+                keys: crate::keymap::display_keys(k),
+            })
+            .collect();
+        self.open_picker(
+            PickerKind::Commands(items),
+            String::new(),
+            PickerTarget::Command,
+            window,
+            cx,
+        );
+    }
+
+    /// コマンド id のコマンドを実行する（コマンドパレットから）
+    fn run_command(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = crate::keymap::action_name(id) else {
+            return;
+        };
+        match cx.build_action(name, None) {
+            Ok(action) => window.dispatch_action(action, cx),
+            Err(e) => log::warn!("コマンド {id} を実行できませんでした: {e}"),
+        }
+    }
+
+    /// ブラウザで押された wimux のキー（Ctrl+T など）。ブラウザは別ウィンドウなので、
+    /// キーは GPUI に届かない。ブラウザの区画をアクティブにしてから、そのコマンドを実行する
+    fn on_browser_key(
+        &mut self,
+        id: PaneId,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = crate::keymap::forwarded_action(key) else {
+            return;
+        };
+        self.on_browser_msg(id, BrowserMsg::Focused, cx);
+        // キーボードの入力先を wimux に戻す（コマンドのあとターミナルや入力欄に打てるように）
+        window.activate_window();
+        self.focus_handle.focus(window, cx);
+        match cx.build_action(name, None) {
+            Ok(action) => window.dispatch_action(action, cx),
+            Err(e) => log::warn!("{key} のコマンドを実行できませんでした: {e}"),
+        }
+        cx.notify();
     }
 
     /// Ctrl+Shift+L: 右に分割して、新しい区画を空のブラウザにする（URL 欄にカーソル）。
@@ -1555,8 +1542,8 @@ impl WimuxWindow {
         match msg {
             BrowserMsg::Title(t) => pane.title = Some(t),
             BrowserMsg::Loading(l) => pane.loading = l,
-            // 新しいタブを開くのは上（受信側）で処理する
-            BrowserMsg::NewWindow(_) => {}
+            // 新しいタブを開く・キーを回すのは上（受信側）で処理する
+            BrowserMsg::NewWindow(_) | BrowserMsg::Key(_) => {}
             // ブラウザをクリックした: その区画・タブをアクティブにする（タブの青い線を移す）
             BrowserMsg::Focused => {
                 pane.attention = false;
@@ -1833,6 +1820,11 @@ impl WimuxWindow {
                             ws.custom_name = (!value.is_empty()).then(|| value.clone());
                         }
                         self.schedule_save(cx);
+                    }
+                    PickerTarget::Command => {
+                        self.focus_active(window, cx);
+                        self.run_command(value, window, cx);
+                        return;
                     }
                 }
                 self.focus_active(window, cx);
@@ -4167,6 +4159,7 @@ impl Render for WimuxWindow {
             .on_action(cx.listener(Self::open_browser))
             .on_action(cx.listener(Self::jump_to_attention))
             .on_action(cx.listener(Self::split_browser))
+            .on_action(cx.listener(Self::command_palette))
             .relative()
             .flex()
             .flex_row()
