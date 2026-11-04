@@ -97,12 +97,13 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | Ctrl+Shift+R | ワークスペース名の変更（サイドバーのダブルクリック、右クリックメニューでも可） |
 | サイドバーで右クリック | 名前を変更 / 新しいワークスペース / 上へ移動 / 下へ移動 / 削除 |
 | サイドバーのワークスペースをドラッグ | 並べ替え（落としたワークスペースの位置に入る。一覧の空きに落とすといちばん下） |
-| Ctrl+Shift+T | フォーカス中の区画に新しいタブ（今のフォルダで開く） |
+| Ctrl+T / Ctrl+Shift+T | フォーカス中の区画に新しいタブ（今のフォルダで開く） |
 | Ctrl+] / Ctrl+[（Ctrl+Tab / Ctrl+Shift+Tab） | 区画内の次 / 前のタブ |
 | Ctrl+D / Ctrl+Shift+D | 区画を右に分割 / 下に分割（Ctrl+Shift+E も下に分割。各区画のタブ行の ◫ ⊟ でも可） |
 | Ctrl+矢印 / Alt+矢印 | 区画間の移動 |
 | Alt+Shift+矢印 | 分割の境界をその方向へ動かす（5% ずつ）。境界の線をマウスでドラッグしても変えられる |
-| Ctrl+Shift+W | タブを閉じる（最後のタブなら区画も閉じる） |
+| Ctrl+W / Ctrl+Shift+W | タブを閉じる（最後のタブなら区画も閉じる） |
+| Ctrl+Shift+L | 右に分割して、新しい区画を空のブラウザにする（URL 欄に入力して Enter）。ブラウザのタブを見ているときは、その URL 欄へ |
 | Ctrl+Shift+G / `cdi [キーワード]` | フォルダ履歴からターミナル内で選んで移動（fzf を使う。PATH になければインストーラー同梱の fzf.exe、それもなければ内蔵の選択画面） |
 | Ctrl+C | 文字を選択中ならコピー、そうでなければ ^C（中断） |
 | Ctrl+V | クリップボードに文字があれば貼り付け。画像だけ（スクショなど）のときは、Claude Code には Alt+V（画像の貼り付け）を送り、それ以外のアプリには Ctrl+V をそのまま送る |
@@ -122,7 +123,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | `sondev notify [--title 題] 本文` | シェルから通知を出す（`cargo build; sondev notify ビルド完了` など） |
 
 キー割り当ては `window.rs` の `key_bindings()`。ターミナル（`TerminalView::on_key_down`）より先にキー割り当てが処理される。
-そのため Ctrl+D（EOF）・Ctrl+[（Esc と同じ）・Ctrl+←→（PSReadLine の単語移動）はシェルには届かない。
+そのため Ctrl+D（EOF）・Ctrl+[（Esc と同じ）・Ctrl+←→（PSReadLine の単語移動）・Ctrl+T・Ctrl+W（単語の削除）はシェルやアプリ（Claude Code の Ctrl+T など）には届かない。
 
 ## 環境変数
 
@@ -231,6 +232,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] 見えない区画・別ワークスペース・ポップアップ表示中は `set_visible(false)` で隠す（子ウィンドウは GPUI の上に重なるため）
 - [x] 設定で「AI からブラウザを操作」を ON にすると `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`（再起動後に反映）
 - [ ] Windows での動作確認（Linux はブラウザペイン非対応）
+- [x] ブラウザをクリックしたら、その区画・タブをアクティブにする（WebView2 の GotFocus → `BrowserMsg::Focused`。クリックは別ウィンドウに行くので GPUI には届かない）
 - [ ] ブラウザにフォーカスがある間は wimux のキー操作が効かない。必要なら WebView 側でキーを拾って転送する
 
 ## 既知の注意点
@@ -247,4 +249,4 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - ブラウザ（別ウィンドウ）を隠す条件は `sync_browsers` と `render_browser` で必ず揃える。ずれると描画のたびに「隠す → 表示」を繰り返してチカチカする。境界のドラッグ（`resizing`）中は隠さず、タブ・ワークスペースのドラッグ中だけ隠す（`tab_dragging`）
 - WebView2 の作成中は Windows のメッセージループが回る。GPUI の処理の途中（render や action の中）で作ると GPUI が二重に呼ばれて壊れるので、`sync_browsers` では生のウィンドウハンドルだけを持って非同期タスクの中で作っている
 - GPUI（Windows）は DirectComposition の描画を子ウィンドウより **上** に重ねる（`CreateTargetForHwnd(hwnd, true)`）ため、WebView2 を子ウィンドウにすると隠れて見えない。そこで `browser.rs` の `host::HostWindow`（メインウィンドウに所有された枠なしウィンドウ）に WebView2 を入れ、区画の位置（画面座標）に重ねている。メインウィンドウを動かしたときは window.rs の 30ms タイマーで `reposition` して追従させる
-- Windows 専用コードは Linux でも型チェックできる: `RUSTFLAGS="--cfg wimux_check" cargo check`
+- Windows 専用コードは Linux でも型チェックできる: `RUSTFLAGS="--cfg wimux_check" cargo check`。`rustup target add x86_64-pc-windows-msvc` すれば `cargo check --target x86_64-pc-windows-msvc` で Windows 向けそのものも型チェックできる（リンクはしない）

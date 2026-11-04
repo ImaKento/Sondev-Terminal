@@ -46,6 +46,10 @@ pub enum BrowserMsg {
     /// ページが新しいウィンドウを開こうとした（右クリックの「新しいウィンドウで開く」、
     /// `target="_blank"` のリンク、`window.open`）。別ウィンドウは出さず、同じ区画の新しいタブで開く
     NewWindow(String),
+    /// ページがクリックされるなどして、ブラウザにフォーカスが移った
+    /// （ブラウザは別ウィンドウなので、GPUI にはクリックが届かない）
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Focused,
 }
 
 pub type BrowserSender = flume::Sender<(PaneId, BrowserMsg)>;
@@ -73,7 +77,9 @@ impl Browser {
         let host = host::HostWindow::new(owner.0)?;
         let tx_title = tx.clone();
         let tx_load = tx.clone();
-        let tx_new = tx;
+        let tx_new = tx.clone();
+        #[cfg_attr(not(windows), allow(unused_variables))]
+        let tx_focus = tx;
         let webview = WebViewBuilder::new_with_web_context(context)
             .with_url(url)
             .with_bounds(Rect {
@@ -96,6 +102,8 @@ impl Browser {
                 NewWindowResponse::Deny
             })
             .build_as_child(&host)?;
+        #[cfg(windows)]
+        watch_focus(&webview, id, tx_focus);
         Ok(Self {
             webview,
             host,
@@ -174,6 +182,24 @@ impl Browser {
 
     pub fn reload(&self) {
         let _ = self.webview.reload();
+    }
+}
+
+/// WebView2 にフォーカスが移ったら知らせる（WebView2 の GotFocus）。
+/// ページをクリックしても GPUI 側にはクリックが届かないので、これで区画をアクティブにする
+#[cfg(windows)]
+fn watch_focus(webview: &WebView, id: PaneId, tx: BrowserSender) {
+    use webview2_com::FocusChangedEventHandler;
+    use wry::WebViewExtWindows as _;
+    let controller = webview.controller();
+    let handler = FocusChangedEventHandler::create(Box::new(move |_, _| {
+        let _ = tx.send((id, BrowserMsg::Focused));
+        Ok(())
+    }));
+    let mut token = 0i64;
+    // SAFETY: 有効なコントローラーとハンドラー。ハンドラーは WebView と一緒に破棄される
+    if let Err(e) = unsafe { controller.add_GotFocus(&handler, &mut token) } {
+        log::warn!("ブラウザのフォーカスの通知を登録できませんでした: {e}");
     }
 }
 

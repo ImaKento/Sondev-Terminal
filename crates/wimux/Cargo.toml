@@ -32,6 +32,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# ブラウザ（WebView2）のフォーカスの通知に使う。wry が使っているのと同じ版（新しい依存は増えない）
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+
 [build-dependencies]
 # exe にアイコンとバージョン情報を埋め込む（Windows 向けビルドのときだけ使う）
 winresource = "0.1"
