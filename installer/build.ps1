@@ -41,7 +41,10 @@ if (-not (Test-Path $fzfExe)) {
     Write-Host "== fzf (download)" -ForegroundColor Cyan
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $rel = Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/junegunn/fzf/releases/latest"
+        # On CI, use the token to avoid the API rate limit for anonymous requests
+        $headers = @{}
+        if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN" }
+        $rel = Invoke-RestMethod -UseBasicParsing -Headers $headers "https://api.github.com/repos/junegunn/fzf/releases/latest"
         $asset = $rel.assets | Where-Object { $_.name -like "*windows_amd64.zip" } | Select-Object -First 1
         $zip = Join-Path $env:TEMP $asset.name
         Invoke-WebRequest -UseBasicParsing $asset.browser_download_url -OutFile $zip

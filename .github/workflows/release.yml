@@ -1,0 +1,102 @@
+# リリース: インストーラーを作って GitHub Releases に置く
+#
+# やり方は 2 通り（どちらでもよい）
+#   1. Actions → Release → Run workflow で、バージョン（例: 0.2.0）を入れて実行
+#      → main の最新から v0.2.0 のタグとリリースを作る
+#   2. タグを push する:  git tag v0.2.0 && git push origin v0.2.0
+#
+# バージョンはタグから決める（Cargo.toml の version はビルドの間だけ書き換える）。
+# exe のバージョン情報・インストーラーのファイル名・アプリ内の表示がすべてこの番号になる。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "バージョン（例: 0.2.0。先頭の v は不要）"
+        required: true
+      prerelease:
+        description: "プレリリースにする"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: バージョンを決める
+        id: ver
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $v = "$env:INPUT_VERSION".Trim().TrimStart("v")
+          } else {
+            $v = "$env:GITHUB_REF_NAME".TrimStart("v")
+          }
+          if ($v -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
+            throw "バージョンの形式が正しくありません: '$v'（例: 0.2.0 / 0.2.0-beta.1）"
+          }
+          $tag = "v$v"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            git fetch --tags --quiet
+            if (git tag --list $tag) { throw "タグ $tag はもうあります" }
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          # ビルドの間だけ Cargo.toml の [workspace.package] version を書き換える
+          $toml = Get-Content Cargo.toml -Raw
+          $toml = [regex]::Replace($toml, '(?m)^version\s*=\s*"[^"]*"', "version = `"$v`"", 1)
+          [IO.File]::WriteAllText("$PWD\Cargo.toml", $toml)
+          Write-Host "Sondev Terminal $v ($tag)"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: ツール（Inno Setup・cargo-about）
+        uses: ./.github/actions/windows-tools
+
+      - name: インストーラーを作る
+        shell: pwsh
+        run: ./installer/build.ps1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: リリースを作る
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $v = "${{ steps.ver.outputs.version }}"
+          $files = @(Get-ChildItem dist\SondevTerminal-setup-*.exe | ForEach-Object { $_.FullName })
+          if ($files.Count -eq 0) { throw "インストーラーが見つかりません" }
+          $ghArgs = @("release", "create", $tag) + $files + @(
+            "--title", "Sondev Terminal $v",
+            "--generate-notes",
+            "--target", "${{ github.sha }}"
+          )
+          if ("${{ inputs.prerelease }}" -eq "true" -or $v.Contains("-")) { $ghArgs += "--prerelease" }
+          gh @ghArgs
+          if ($LASTEXITCODE -ne 0) { throw "リリースを作れませんでした" }
