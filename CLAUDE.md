@@ -43,6 +43,7 @@ wimux/
 │  ├─ hooks.rs                # Claude Code のフック / Codex の notify / `sondev notify` → エージェントの状態
 │  ├─ claude_session.rs       # Claude Code のフック設定（--settings）と、ペインごとのセッション ID の記録
 │  ├─ open.rs                 # Ctrl+クリックで URL・ファイルを外のアプリ（ブラウザ・エディタ）で開く
+│  ├─ update.rs               # 新しいバージョンの確認（GitHub Releases）と、［更新］でのダウンロード・上書きインストール
 │  ├─ theme.rs                # テーマ（ターミナル配色）と、そこから作る UI 色・文字サイズ・寸法
 │  ├─ settings.rs             # settings.json（テーマ・フォント・文字サイズ・Claude 自動再開・エディタ）
 │  └─ terminal/
@@ -86,6 +87,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 - `about.toml` / `installer/about.hbs` … 使用ライブラリのライセンス一覧（cargo-about）。許可していないライセンスの依存を足すと生成が失敗するので、そのときは中身を確認して `accepted` に追加する
 - WebView2 ランタイム・VC++ ランタイムは同梱していない（Windows 10 / 11 には通常入っている）
 - 署名していないので、初回起動時に SmartScreen の警告が出る
+- **アップデート**: 起動の 5 秒後と 12 時間ごとに `update.rs` が GitHub Releases の最新版を確かめ（`curl.exe`。依存を増やさないため）、新しければサイドバーの下に「新しいバージョン vX ［更新］」。［更新］でインストーラーを %TEMP% にダウンロードし `/SILENT /relaunch=1` で起動、アプリは保存して終了する。インストーラーは上書き後に新しい版を起動する（`wimux.iss` の `RelaunchRequested`）。**リポジトリが public で、Release にインストーラーが付いていること**が前提。開発ビルドでは確認しない（`WIMUX_UPDATE_CHECK=1` で確認、`=0` で常に確認しない。設定画面でも OFF にできる）
 
 ## キー操作
 
@@ -134,6 +136,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | `WIMUX_WIN32_INPUT=0` | win32-input-mode を使わない（キー入力の不具合切り分け用） |
 | `WIMUX_PTY_LOG=<path>` | PTY の生出力をファイルに記録（デバッグ用） |
 | `WIMUX_CONDA_ROOT` | conda の場所（自動検出できないとき） |
+| `WIMUX_UPDATE_CHECK=0` / `=1` | 新しいバージョンを確認しない / 開発ビルドでも確認する |
 | `WIMUX_IPC` / `WIMUX_EXE` | （wimux がペインに渡す）フック・`sondev notify` の送り先と、sondev.exe の場所 |
 
 ## ビルド・実行（Windows）
