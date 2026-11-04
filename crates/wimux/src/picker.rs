@@ -1,6 +1,7 @@
 //! 画面上部に出る入力ボックス付きのポップアップ。
 //! - フォルダ履歴から選んで移動（cdi）
 //! - ワークスペース名の変更
+//! - コマンドパレット（Ctrl+Shift+P）
 //!
 //! 日本語入力（IME）にも対応している。
 
@@ -11,6 +12,8 @@ use crate::dirs::DirHistory;
 use crate::theme::*;
 
 const MAX_RESULTS: usize = 12;
+/// コマンドパレットに一度に出す数
+const MAX_COMMANDS: usize = 14;
 
 #[derive(Debug, Clone)]
 pub enum PickerKind {
@@ -19,6 +22,16 @@ pub enum PickerKind {
     Dirs,
     /// テキストを入力する（ワークスペース名など）
     Text { title: String },
+    /// コマンドパレット（名前で絞り込んで、選んだコマンドの id を返す）
+    Commands(Vec<CommandItem>),
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandItem {
+    pub id: String,
+    pub label: String,
+    /// 表示用のキー（"Ctrl+T / Ctrl+Shift+T"）
+    pub keys: String,
 }
 
 pub enum PickerEvent {
@@ -35,6 +48,8 @@ pub struct Picker {
     query: String,
     marked_text: Option<String>,
     results: Vec<String>,
+    /// コマンドパレットで絞り込んだ結果（`PickerKind::Commands` の何番目か）
+    commands: Vec<usize>,
     selected: usize,
 }
 
@@ -59,24 +74,58 @@ impl Picker {
             query: initial,
             marked_text: None,
             results: Vec::new(),
+            commands: Vec::new(),
             selected: 0,
         };
         this.refresh(history);
         this
     }
 
-    /// 結果を更新する（Dirs のときだけ）
+    /// 結果を更新する（Dirs・Commands のとき）
     pub fn refresh(&mut self, history: Option<&DirHistory>) {
-        if let (PickerKind::Dirs, Some(h)) = (&self.kind, history) {
-            self.results = h.query(&self.query, MAX_RESULTS);
-            self.selected = self.selected.min(self.results.len().saturating_sub(1));
+        match (&self.kind, history) {
+            (PickerKind::Dirs, Some(h)) => {
+                self.results = h.query(&self.query, MAX_RESULTS);
+            }
+            (PickerKind::Commands(items), _) => {
+                let words: Vec<String> = self
+                    .query
+                    .to_lowercase()
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                self.commands = items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| {
+                        let hay = format!("{} {} {}", c.label, c.id, c.keys).to_lowercase();
+                        words.iter().all(|w| hay.contains(w.as_str()))
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+            _ => {}
+        }
+        self.selected = self.selected.min(self.count().saturating_sub(1));
+    }
+
+    /// 選べる結果の数
+    fn count(&self) -> usize {
+        match self.kind {
+            PickerKind::Commands(_) => self.commands.len(),
+            _ => self.results.len(),
         }
     }
 
     fn confirm(&mut self, cx: &mut Context<Self>) {
-        let value = match self.kind {
+        let value = match &self.kind {
             PickerKind::Dirs => self.results.get(self.selected).cloned(),
             PickerKind::Text { .. } => Some(self.query.trim().to_string()),
+            PickerKind::Commands(items) => self
+                .commands
+                .get(self.selected)
+                .and_then(|i| items.get(*i))
+                .map(|c| c.id.clone()),
         };
         match value {
             Some(v) => cx.emit(PickerEvent::Confirmed(v)),
@@ -110,13 +159,13 @@ impl Picker {
             "enter" => self.confirm(cx),
             "up" => self.selected = self.selected.saturating_sub(1),
             "down" => {
-                if self.selected + 1 < self.results.len() {
+                if self.selected + 1 < self.count() {
                     self.selected += 1;
                 }
             }
             "p" if ctrl => self.selected = self.selected.saturating_sub(1),
             "n" if ctrl => {
-                if self.selected + 1 < self.results.len() {
+                if self.selected + 1 < self.count() {
                     self.selected += 1;
                 }
             }
@@ -147,8 +196,11 @@ impl Render for Picker {
         let title = match &self.kind {
             PickerKind::Dirs => "cdi — フォルダへ移動".to_string(),
             PickerKind::Text { title } => title.clone(),
+            PickerKind::Commands(_) => "コマンドパレット".to_string(),
         };
-        let placeholder = matches!(self.kind, PickerKind::Dirs) && self.query.is_empty();
+        let is_commands = matches!(self.kind, PickerKind::Commands(_));
+        let placeholder = matches!(self.kind, PickerKind::Dirs | PickerKind::Commands(_))
+            && self.query.is_empty();
         let mut display = self.query.clone();
         if let Some(m) = &self.marked_text {
             display.push_str(m);
@@ -166,13 +218,18 @@ impl Render for Picker {
             .border_color(rgb(th().panel_border))
             .text_size(px(14.))
             .text_color(rgb(th().text))
-            .when(matches!(self.kind, PickerKind::Dirs), |el| {
-                el.child(div().text_color(rgb(th().text_faint)).child("›"))
-            })
+            .when(
+                matches!(self.kind, PickerKind::Dirs | PickerKind::Commands(_)),
+                |el| el.child(div().text_color(rgb(th().text_faint)).child("›")),
+            )
             .child(if placeholder {
                 div()
                     .text_color(rgb(th().text_faint))
-                    .child("フォルダを検索（スペース区切りで絞り込み）")
+                    .child(if is_commands {
+                        "コマンドを検索（例: 分割、タブ、ブラウザ）"
+                    } else {
+                        "フォルダを検索（スペース区切りで絞り込み）"
+                    })
             } else {
                 div().child(format!("{display}▏"))
             })
@@ -233,7 +290,58 @@ impl Render for Picker {
                 )
         });
 
+        // コマンドパレットの結果（名前と、右にキー）
+        let command_rows: Vec<AnyElement> = match &self.kind {
+            PickerKind::Commands(items) => self
+                .commands
+                .iter()
+                .enumerate()
+                .filter_map(|(row, i)| Some((row, items.get(*i)?)))
+                .take(MAX_COMMANDS)
+                .map(|(row, c)| {
+                    let selected = row == self.selected;
+                    div()
+                        .id(("command-item", row))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.))
+                        .h(px(30.))
+                        .px(px(10.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .when(selected, |el| el.bg(rgb(th().selected_bg)))
+                        .when(!selected, |el| el.hover(|s| s.bg(rgb(th().hover_bg))))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.selected = row;
+                            this.confirm(cx);
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(UI_TEXT))
+                                .text_color(rgb(if selected { 0xffffff } else { th().text }))
+                                .child(c.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(UI_SMALL))
+                                .text_color(rgb(if selected {
+                                    th().selected_meta
+                                } else {
+                                    th().text_faint
+                                }))
+                                .child(c.keys.clone()),
+                        )
+                        .into_any_element()
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let no_commands = is_commands && self.commands.is_empty();
+
         let is_dirs = matches!(self.kind, PickerKind::Dirs);
+        let is_list = is_dirs || is_commands;
         div()
             .id("picker")
             .key_context("Picker")
@@ -249,7 +357,7 @@ impl Render for Picker {
             .border_1()
             .border_color(rgb(th().panel_border))
             .shadow_lg()
-            .when(!is_dirs, |el| {
+            .when(!is_list, |el| {
                 el.child(
                     div()
                         .px(px(12.))
@@ -282,6 +390,26 @@ impl Render for Picker {
                         }),
                 )
             })
+            .when(is_commands, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .p(px(6.))
+                        .children(command_rows)
+                        .when(no_commands, |el| {
+                            el.child(
+                                div()
+                                    .px(px(10.))
+                                    .py(px(8.))
+                                    .text_size(px(UI_SMALL))
+                                    .text_color(rgb(th().text_faint))
+                                    .child("見つかりません"),
+                            )
+                        }),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -292,9 +420,11 @@ impl Render for Picker {
                     .border_color(rgb(th().panel_border))
                     .text_size(px(11.))
                     .text_color(rgb(th().text_faint))
-                    .child(if is_dirs { title } else { String::new() })
+                    .child(if is_list { title } else { String::new() })
                     .child(if is_dirs {
                         "↑↓ 選択   Enter 移動   Esc 閉じる"
+                    } else if is_commands {
+                        "↑↓ 選択   Enter 実行   Esc 閉じる"
                     } else {
                         "Enter 決定   Esc キャンセル"
                     }),
