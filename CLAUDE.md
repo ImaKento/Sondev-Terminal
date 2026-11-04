@@ -60,7 +60,7 @@ wimux/
 - `%APPDATA%\wimux\session.json` … ワークスペース・分割・区画ごとのタブ・ペインごとの cwd / conda / Claude 起動状態（v2。v1 は読み込み時に変換）
 - `%APPDATA%\wimux\dirs.json` … フォルダ履歴（初回は zoxide の履歴を取り込む）
 - `%APPDATA%\wimux\dirs.txt` … シェルの `cdi` が読むフォルダ一覧（よく行く順。wimux が保存のたびに書き出す）
-- `%APPDATA%\wimux\settings.json` … 設定画面の内容
+- `%APPDATA%\wimux\settings.json` … 設定画面の内容（テーマ・フォント・文字サイズ・行の高さ・カーソル・透過など）
 
 ## 配布（インストーラー）
 
@@ -93,12 +93,14 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 |---|---|
 | Ctrl+Shift+N | 新しいワークスペース |
 | Ctrl+Shift+PageDown / PageUp | 次 / 前のワークスペース |
+| Ctrl+1〜8 / Ctrl+9 | 1〜8 番目 / 最後のワークスペース |
 | Ctrl+Shift+R | ワークスペース名の変更（サイドバーのダブルクリック、右クリックメニューでも可） |
 | サイドバーで右クリック | 名前を変更 / 新しいワークスペース / 削除 |
 | Ctrl+Shift+T | フォーカス中の区画に新しいタブ（今のフォルダで開く） |
-| Ctrl+Tab / Ctrl+Shift+Tab | 区画内の次 / 前のタブ |
-| Ctrl+Shift+D / Ctrl+Shift+E | 区画を右に分割 / 下に分割（各区画のタブ行の ◫ ⊟ でも可） |
-| Alt+矢印 | 区画間の移動 |
+| Ctrl+] / Ctrl+[（Ctrl+Tab / Ctrl+Shift+Tab） | 区画内の次 / 前のタブ |
+| Ctrl+D / Ctrl+Shift+D | 区画を右に分割 / 下に分割（Ctrl+Shift+E も下に分割。各区画のタブ行の ◫ ⊟ でも可） |
+| Ctrl+矢印 / Alt+矢印 | 区画間の移動 |
+| Alt+Shift+矢印 | 分割の境界をその方向へ動かす（5% ずつ）。境界の線をマウスでドラッグしても変えられる |
 | Ctrl+Shift+W | タブを閉じる（最後のタブなら区画も閉じる） |
 | Ctrl+Shift+G / `cdi [キーワード]` | フォルダ履歴からターミナル内で選んで移動（fzf を使う。PATH になければインストーラー同梱の fzf.exe、それもなければ内蔵の選択画面） |
 | Ctrl+C | 文字を選択中ならコピー、そうでなければ ^C（中断） |
@@ -119,6 +121,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | `sondev notify [--title 題] 本文` | シェルから通知を出す（`cargo build; sondev notify ビルド完了` など） |
 
 キー割り当ては `window.rs` の `key_bindings()`。ターミナル（`TerminalView::on_key_down`）より先にキー割り当てが処理される。
+そのため Ctrl+D（EOF）・Ctrl+[（Esc と同じ）・Ctrl+←→（PSReadLine の単語移動）はシェルには届かない。
 
 ## 環境変数
 
@@ -154,6 +157,8 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
 ## 見た目（cmux / herdr を参考）
 
 - テーマは `theme.rs` の `THEMES`（ターミナルの 16 色＋前景・背景だけを定義）。UI の色は `derive()` で自動生成し、コードからは `th().text` のように参照する。テーマを足すときは `THEMES` に 1 件追加するだけでよい
+- 背景の透過: 設定の `opacity`（1.0 = 透過なし）と `backdrop`（ぼかし / 透かす / Mica / Mica Alt）。`window.rs` の `apply_backdrop` で `WindowBackgroundAppearance` を切り替え、背景は `theme::bg()` で透明度つきで塗る。重ね塗りで濃くならないよう、透過中はルートとターミナル本体（`view.rs`）は背景を塗らず、サイドバー・タブの行・区画の枠だけが塗る
+- 行の高さ（`theme::line_height()`）とカーソルの形（`terminal::set_default_cursor` → alacritty の `default_cursor_style`）も設定画面から変更できる
 - 今のターミナル配色は `terminal::colors::current()`（PTY の読み取りスレッドからも参照するためグローバル）
 - 文字サイズ: ターミナル 13（Ghostty / cmux の既定）、UI 13 / タブ 12.5 / 補足 11.5
 - プロンプト: 標準の `PS パス>` のときは git のブランチ名を `PS C:\repo (main)>` のように表示（.git/HEAD を直接読むので速い。`$env:WIMUX_GIT_PROMPT = "0"` で無効）
@@ -198,7 +203,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] 文字選択とコピー（ドラッグ、ダブルクリックで単語、トリプルクリックで行）
 - [x] スクロールバック検索（Ctrl+Shift+F）
 - [x] URL・ファイルパスの Ctrl+クリック（OSC 8 のリンクにも対応）
-- [ ] 分割境界のドラッグでサイズ変更
+- [x] 分割境界のドラッグでサイズ変更（`DraggedDivider`。比率は session.json に保存）・Alt+Shift+矢印
 - [ ] 設定ファイル（`%APPDATA%\wimux\config.toml`: フォント、サイズ、配色、シェル、キー割り当て）
 - [ ] タブのドラッグ並べ替え、ワークスペースの並べ替え
 

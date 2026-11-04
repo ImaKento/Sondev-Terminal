@@ -13,14 +13,14 @@ pub mod view;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
 use anyhow::{Context as _, Result};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -180,6 +180,34 @@ impl Drop for Shared {
     }
 }
 
+/// 既定のカーソルの形（設定画面）。0 = ブロック, 1 = 縦線, 2 = 下線
+static DEFAULT_CURSOR: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_default_cursor(kind: crate::settings::CursorKind) {
+    use crate::settings::CursorKind;
+    let v = match kind {
+        CursorKind::Block => 0,
+        CursorKind::Beam => 1,
+        CursorKind::Underline => 2,
+    };
+    DEFAULT_CURSOR.store(v, Ordering::Relaxed);
+}
+
+fn term_config() -> TermConfig {
+    let shape = match DEFAULT_CURSOR.load(Ordering::Relaxed) {
+        1 => CursorShape::Beam,
+        2 => CursorShape::Underline,
+        _ => CursorShape::Block,
+    };
+    TermConfig {
+        default_cursor_style: CursorStyle {
+            shape,
+            blinking: false,
+        },
+        ..TermConfig::default()
+    }
+}
+
 pub struct Terminal {
     pub shared: Arc<Shared>,
     pub rx: flume::Receiver<TermMsg>,
@@ -250,7 +278,7 @@ impl Terminal {
             writer: writer.clone(),
             window_size: window_size.clone(),
         };
-        let term = Term::new(TermConfig::default(), &size, proxy);
+        let term = Term::new(term_config(), &size, proxy);
 
         let shared = Arc::new(Shared {
             term: FairMutex::new(term),
@@ -333,6 +361,11 @@ impl Terminal {
             })?;
 
         Ok(Self { shared, rx })
+    }
+
+    /// 設定（既定のカーソルの形など）を反映する
+    pub fn apply_config(&self) {
+        self.shared.term.lock().set_options(term_config());
     }
 }
 
