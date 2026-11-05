@@ -47,6 +47,22 @@ pub enum Message {
         title: Option<String>,
         body: String,
     },
+    /// Claude の利用上限（5 時間枠・週）の使用率。Claude Code のステータスラインから届く
+    Usage {
+        #[serde(default)]
+        five_hour: Option<LimitWindow>,
+        #[serde(default)]
+        seven_day: Option<LimitWindow>,
+    },
+}
+
+/// 利用上限の 1 つの枠
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LimitWindow {
+    /// 使った割合（0〜100）
+    pub used_percentage: f64,
+    /// 枠が戻る時刻（Unix 時刻・秒）
+    pub resets_at: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

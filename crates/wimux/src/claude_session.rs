@@ -99,7 +99,7 @@ pub fn write_hook_settings() -> Option<PathBuf> {
             "timeout": 5,
         }]
     }]);
-    let settings = serde_json::json!({
+    let mut settings = serde_json::json!({
         "hooks": {
             "SessionStart": hook,
             "UserPromptSubmit": hook,
@@ -109,12 +109,39 @@ pub fn write_hook_settings() -> Option<PathBuf> {
             "SessionEnd": hook,
         }
     });
+    // ステータスライン: Claude の利用上限（5 時間枠・週）を受け取ってサイドバーに出す。
+    // --settings の statusLine はユーザーの設定より優先されるので、ユーザーが自分の
+    // ステータスラインを使っているときは入れない（その人の表示を消さないため）
+    if !user_has_statusline() {
+        settings["statusLine"] = serde_json::json!({
+            "type": "command",
+            "command": format!("\"{exe}\" --claude-statusline"),
+        });
+    }
     let path = session::config_dir().join("claude-hook-settings.json");
     let bytes = serde_json::to_vec_pretty(&settings).ok()?;
     if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
         session::write_atomic(&path, &bytes).ok()?;
     }
     Some(path)
+}
+
+/// ユーザーが Claude Code に自分のステータスラインを設定しているか（~/.claude/settings.json）
+fn user_has_statusline() -> bool {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|h| PathBuf::from(h).join(".claude"))
+        });
+    let Some(dir) = dir else {
+        return false;
+    };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .is_some_and(|v| v.get("statusLine").is_some_and(|s| !s.is_null()))
 }
 
 /// Sondev のブラウザを Claude Code から操作するための MCP の設定（`claude --mcp-config` に渡す）。
