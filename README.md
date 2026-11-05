@@ -166,7 +166,7 @@ Claude Code の全画面表示や vim など、アプリがマウスを使うと
 
 **Ctrl+,**（またはサイドバー右下の「⚙ 設定」）で開きます。テーマ・フォント・文字サイズ・行の高さ・カーソル・背景の透過・ブラウザ・Claude Code の再開・アップデートを変えられます。
 
-設定は `%APPDATA%\wimux\settings.json` に保存されます。画面にない項目は、ここを直接編集します（再起動後に反映）。
+設定は `%APPDATA%\SondevTerminal\settings.json` に保存されます。画面にない項目は、ここを直接編集します（再起動後に反映）。
 
 ### キー割り当ての変更
 ```json
@@ -202,12 +202,13 @@ Claude Code の全画面表示や vim など、アプリがマウスを使うと
 
 | 場所 | 中身 |
 |---|---|
-| `%APPDATA%\wimux\session.json` | ワークスペース・分割・タブ・各ペインのフォルダ・conda・Claude の会話 |
-| `%APPDATA%\wimux\settings.json` | 設定 |
-| `%APPDATA%\wimux\dirs.json` | フォルダ履歴（`cdi` 用） |
-| `%APPDATA%\wimux\window.json` | ウィンドウの位置・大きさ |
+| `%APPDATA%\SondevTerminal\session.json` | ワークスペース・分割・タブ・各ペインのフォルダ・conda・Claude の会話 |
+| `%APPDATA%\SondevTerminal\settings.json` | 設定 |
+| `%APPDATA%\SondevTerminal\dirs.json` | フォルダ履歴（`cdi` 用） |
+| `%APPDATA%\SondevTerminal\window.json` | ウィンドウの位置・大きさ |
 
-アンインストールしても、これらは残ります。
+ブラウザのデータ（ログイン状態など）は `%LOCALAPPDATA%\SondevTerminal\WebView2` にあります。
+アンインストールしても、これらは残ります。以前の版の保存先（`%APPDATA%\wimux`）は、起動時に自動でここへ移します。
 
 ---
 

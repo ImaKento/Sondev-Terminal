@@ -1,13 +1,13 @@
 ﻿; Sondev Terminal インストーラー（Inno Setup 6）
-; （開発中の名前は wimux。フォルダ名・設定の保存先などは wimux のまま）
+; （開発中の名前は wimux。コードのフォルダ名・環境変数は wimux のまま）
 ; ※ このファイルは UTF-8（BOM 付き）で保存すること。BOM がないと日本語の環境で文字化けする
 ;
 ; 作り方は installer\build.ps1 を実行するだけ（リリースビルド → インストーラー作成）。
 ; 手動で作る場合: ISCC.exe /DAppVersion=0.1.0 installer\wimux.iss
 ;
-; - 管理者権限なしで、ユーザーごとに %LOCALAPPDATA%\Programs\wimux へインストール
+; - 管理者権限なしで、ユーザーごとに %LOCALAPPDATA%\Programs\Sondev Terminal へインストール
 ; - スタートメニューに登録、デスクトップのアイコンは任意
-; - 設定・セッション（%APPDATA%\wimux）はアンインストールしても残す
+; - 設定・セッション（%APPDATA%\SondevTerminal）はアンインストールしても残す
 
 #ifndef AppVersion
   #define AppVersion "0.1.0"

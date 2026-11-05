@@ -179,7 +179,7 @@ function global:__wimux_fzf {
 }
 
 function global:cdi {
-    $dir = if ($env:WIMUX_CONFIG_DIR) { $env:WIMUX_CONFIG_DIR } else { Join-Path $env:APPDATA "wimux" }
+    $dir = if ($env:WIMUX_CONFIG_DIR) { $env:WIMUX_CONFIG_DIR } else { Join-Path $env:APPDATA "SondevTerminal" }
     $file = Join-Path $dir "dirs.txt"
     if (-not (Test-Path -LiteralPath $file)) {
         Write-Host "cdi: no history yet (move around with cd first)"

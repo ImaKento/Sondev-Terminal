@@ -236,6 +236,8 @@ impl Terminal {
         cmd.env("TERM_PROGRAM", "wimux");
         cmd.env("WIMUX", "1");
         cmd.env("WIMUX_PANE_ID", &opts.pane_id);
+        // 保存先（シェル連携の cdi やフックが同じ場所を使うように）
+        cmd.env("WIMUX_CONFIG_DIR", crate::session::config_dir());
         // フック・`sondev notify` が本体へ知らせを送る先
         if let Some(ipc) = crate::ipc::env_value() {
             cmd.env("WIMUX_IPC", ipc);

@@ -59,15 +59,15 @@ wimux/
 ```
 
 保存先（`WIMUX_CONFIG_DIR` で変更可）:
-- `%APPDATA%\wimux\session.json` … ワークスペース・分割・区画ごとのタブ・ペインごとの cwd / conda / Claude 起動状態（v2。v1 は読み込み時に変換）
-- `%APPDATA%\wimux\dirs.json` … フォルダ履歴（初回は zoxide の履歴を取り込む）
-- `%APPDATA%\wimux\dirs.txt` … シェルの `cdi` が読むフォルダ一覧（よく行く順。wimux が保存のたびに書き出す）
-- `%APPDATA%\wimux\settings.json` … 設定画面の内容（テーマ・フォント・文字サイズ・行の高さ・カーソル・透過など）
+- `%APPDATA%\SondevTerminal\session.json` … ワークスペース・分割・区画ごとのタブ・ペインごとの cwd / conda / Claude 起動状態（v2。v1 は読み込み時に変換）
+- `%APPDATA%\SondevTerminal\dirs.json` … フォルダ履歴（初回は zoxide の履歴を取り込む）
+- `%APPDATA%\SondevTerminal\dirs.txt` … シェルの `cdi` が読むフォルダ一覧（よく行く順。wimux が保存のたびに書き出す）
+- `%APPDATA%\SondevTerminal\settings.json` … 設定画面の内容（テーマ・フォント・文字サイズ・行の高さ・カーソル・透過など）
 
 ## 配布（インストーラー）
 
 表示名は「Sondev Terminal」、実行ファイルは `sondev.exe`（`crate::APP_NAME` と `crates/wimux/Cargo.toml` の `[[bin]]`）。
-コード・フォルダ名・設定の保存先（`%APPDATA%\\wimux`）・環境変数（`WIMUX_*`）は開発名の wimux のまま。
+コード・フォルダ名・環境変数（`WIMUX_*`）は開発名の wimux のまま。設定の保存先は `%APPDATA%\SondevTerminal`、ブラウザのデータは `%LOCALAPPDATA%\SondevTerminal\WebView2`。以前の `wimux` フォルダは起動時に自動で移す（`session::migrate_dirs`。移せなければ古い場所をそのまま使う）。
 
 ```powershell
 winget install JRSoftware.InnoSetup               # 初回だけ
@@ -82,9 +82,9 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 
 **CI**: PR と main へのマージでは Linux で fmt・test・`--cfg wimux_check` の型チェックだけ（軽い）。Windows のリリースビルドとインストーラー作成は、Actions → CI → Run workflow で手動実行したときだけ（Windows ランナーは分数が 2 倍で数えられ、1 回 20 分ほどかかるため）。
 
-- `installer/wimux.iss` … Inno Setup の設定。管理者権限なしで `%LOCALAPPDATA%\Programs\wimux` に入る。`AppId` は変えない（アップデートの判定に使う）
+- `installer/wimux.iss` … Inno Setup の設定。管理者権限なしで `%LOCALAPPDATA%\Programs\Sondev Terminal` に入る。`AppId` は変えない（アップデートの判定に使う）
 - `crates/wimux/build.rs` … exe にアイコン（`assets/wimux.ico`、リソース ID 1）とバージョン情報を埋め込む
-- シェル連携スクリプトは exe に埋め込み（`include_str!`）、起動時に `%APPDATA%\wimux\shell-integration\wimux.ps1` へ書き出す
+- シェル連携スクリプトは exe に埋め込み（`include_str!`）、起動時に `%APPDATA%\SondevTerminal\shell-integration\wimux.ps1` へ書き出す
 - `about.toml` / `installer/about.hbs` … 使用ライブラリのライセンス一覧（cargo-about）。許可していないライセンスの依存を足すと生成が失敗するので、そのときは中身を確認して `accepted` に追加する
 - WebView2 ランタイム・VC++ ランタイムは同梱していない（Windows 10 / 11 には通常入っている）
 - 署名していないので、初回起動時に SmartScreen の警告が出る
@@ -245,7 +245,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] 新しいウィンドウの要求（右クリックの「新しいウィンドウで開く」・`target="_blank"`・`window.open`）は別ウィンドウにせず、同じ区画の新しいタブで開く（`with_new_window_req_handler` → `BrowserMsg::NewWindow`）
 - [x] 見えない区画・別ワークスペース・ポップアップ表示中は `set_visible(false)` で隠す（子ウィンドウは GPUI の上に重なるため）
 - [x] 設定で「AI からブラウザを操作」を ON にすると `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`（再起動後に反映）
-- [x] そのとき `%APPDATA%\wimux\claude-mcp.json`（Playwright MCP を `--cdp-endpoint http://127.0.0.1:9222` でつなぐ設定）を書き出し、シェル連携の `claude` 関数が `--mcp-config` で渡す（`claude_session::write_mcp_config`）。`claude mcp add` は不要で、どのプロジェクトでも MCP「sondev-browser」が使える。作業記録は `--output-dir %APPDATA%\wimux\playwright-mcp` に出す（プロジェクトに `.playwright-mcp/` を作らない）。Chrome を別に起動しないこと（9222 は Sondev の WebView2 が使っている）
+- [x] そのとき `%APPDATA%\SondevTerminal\claude-mcp.json`（Playwright MCP を `--cdp-endpoint http://127.0.0.1:9222` でつなぐ設定）を書き出し、シェル連携の `claude` 関数が `--mcp-config` で渡す（`claude_session::write_mcp_config`）。`claude mcp add` は不要で、どのプロジェクトでも MCP「sondev-browser」が使える。作業記録は `--output-dir %APPDATA%\SondevTerminal\playwright-mcp` に出す（プロジェクトに `.playwright-mcp/` を作らない）。Chrome を別に起動しないこと（9222 は Sondev の WebView2 が使っている）
 - [ ] Windows での動作確認（Linux はブラウザペイン非対応）
 - [x] ブラウザをクリックしたら、その区画・タブをアクティブにする（WebView2 の GotFocus → `BrowserMsg::Focused`。クリックは別ウィンドウに行くので GPUI には届かない）
 - [x] ブラウザにフォーカスがある間も wimux のキー操作を効かせる（AcceleratorKeyPressed で拾って転送）
