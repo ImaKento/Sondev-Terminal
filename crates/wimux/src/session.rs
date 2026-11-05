@@ -78,6 +78,12 @@ pub struct PaneState {
     /// そのペインの Claude Code のセッション ID（`claude --resume <ID>` で再開する）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_session: Option<String>,
+    /// 終了時に動いていた Claude 以外のエージェント（"codex" など。シェルのコマンド名）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// そのエージェントのセッション ID（Codex の thread-id。`codex resume <ID>` で再開する）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<String>,
     /// ブラウザのタブなら URL
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -228,12 +234,19 @@ mod tests {
                             conda: Some("labelme".into()),
                             claude: true,
                             claude_session: Some("3f2a9c1e-1234".into()),
-                            url: None,
+                            ..Default::default()
                         }],
                     }),
                     second: Box::new(NodeState::Group {
                         active: 1,
-                        tabs: vec![PaneState::default(), PaneState::default()],
+                        tabs: vec![
+                            PaneState {
+                                agent: Some("codex".into()),
+                                agent_session: Some("0199-abcd".into()),
+                                ..Default::default()
+                            },
+                            PaneState::default(),
+                        ],
                     }),
                 }),
                 ..Default::default()
@@ -257,6 +270,8 @@ mod tests {
                     NodeState::Group { active, tabs } => {
                         assert_eq!(*active, 1);
                         assert_eq!(tabs.len(), 2);
+                        assert_eq!(tabs[0].agent.as_deref(), Some("codex"));
+                        assert_eq!(tabs[0].agent_session.as_deref(), Some("0199-abcd"));
                     }
                     _ => panic!(),
                 }

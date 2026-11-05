@@ -41,14 +41,20 @@ pub enum Message {
         event: AgentEvent,
         #[serde(default)]
         message: Option<String>,
+        /// エージェントのセッション ID（Codex の thread-id。再開に使う）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
     Notify {
         #[serde(default)]
         title: Option<String>,
         body: String,
     },
-    /// Claude の利用上限（5 時間枠・週）の使用率。Claude Code のステータスラインから届く
+    /// 利用上限（5 時間枠・週）の使用率。Claude Code のステータスライン・Codex の記録から届く
     Usage {
+        /// "claude" / "codex"（無ければ claude）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
         #[serde(default)]
         five_hour: Option<LimitWindow>,
         #[serde(default)]
@@ -201,6 +207,7 @@ mod tests {
                 agent: "claude".into(),
                 event: AgentEvent::Asking,
                 message: Some("Claude needs your permission".into()),
+                session: None,
             },
         };
         let json = serde_json::to_string(&env).unwrap();

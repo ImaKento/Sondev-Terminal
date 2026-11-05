@@ -187,6 +187,8 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
 - Claude の利用上限（5 時間枠・週）: フック設定（`--settings`）に `statusLine`（`sondev.exe --claude-statusline`）を入れ、ステータスラインの入力の `rate_limits.five_hour` / `seven_day`（`used_percentage`・`resets_at`）を `ipc.rs` で本体へ送る。サイドバーの下に棒で表示（70% 以上は黄、90% 以上は赤）し、Claude の画面の下にも「モデル · 5h 23%（あと 2時間13分） · 週 41%」を出す。Pro / Max などのサブスクリプションで、最初の応答のあとにだけ届く。ユーザーが ~/.claude/settings.json に自分の statusLine を設定しているときは入れない（`--settings` が優先されて消してしまうため）
 - ファイルを開くエディタは settings.json の `editor`（例: `"code -g {file}:{line}:{col}"`）。未設定なら VS Code → Cursor → Windsurf → 既定のアプリ
 - Claude Code の再開: シェル連携の `claude` 関数が `--settings claude-hook-settings.json` を付けて起動し、SessionStart フック（`sondev.exe --claude-hook`）がペインごとのセッション ID を `claude-sessions\<WIMUX_PANE_ID>` に書く。保存時に読んで session.json に記録し、次回は `claude --resume <ID>`（ID が無ければ `--continue`）
+- Codex などの再開: Codex の notify（`--codex-notify`）の `thread-id` を IPC でペインに送り、session.json の `agent` / `agent_session` に保存。次回は `codex resume <ID>`（無ければ `codex resume --last`。cwd で絞られる）。OpenCode / Copilot は `--continue`、Gemini は `--resume latest`（`window.rs` の `agent_resume_command`。方法が分からないエージェントは再開しない）
+- Codex の利用上限: notify のたびに `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread-id>.jsonl` の末尾から最後の `token_count` の `rate_limits`（primary / secondary の `used_percent`・`window_minutes`・`resets_at`）を読み、`Message::Usage { agent: "codex" }` で送る（`hooks.rs` の `codex_usage`）。枠の長さが 1 日以下なら 5 時間枠、それより長ければ週
 - conda の再開: base も含めて `conda activate` する（conda は遅延初期化なので base も自動では有効にならない）
 - URL 欄（text_field.rs）: カーソル移動・選択・コピー/切り取り/貼り付け・マウス選択に対応。GPUI の examples/input.rs と同じく自前で描画
 - ウィンドウ: 閉じたときの位置・大きさ・最大化を `window.json` に保存し、次の起動で復元（初回や、前回の位置がどの画面にも入らないときは最大化）
@@ -239,7 +241,8 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] `sondev notify` CLI ＋ Claude Code hooks 連携（127.0.0.1 の TCP ＋トークン。hooks の出力は端末に出ないため）
 - [x] Claude 以外のエージェント（Codex・Gemini・Aider など）の状態表示と完了通知
 - [x] 入力待ちのペインへ移動（Ctrl+Shift+U）
-- [x] Claude の利用上限（5 時間枠・週）の表示（ステータスライン経由）
+- [x] Claude の利用上限（5 時間枠・週）の表示（ステータスライン経由）・Codex の利用上限（rollout の記録から）
+- [x] Codex・OpenCode・Copilot・Gemini の会話の再開
 - [ ] git worktree 連携（ブランチごとのワークスペース作成・差分・PR・片付け）
 - [ ] ワークスペース単位で Claude 自動再開の ON/OFF
 

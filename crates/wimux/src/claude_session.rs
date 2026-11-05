@@ -62,6 +62,7 @@ pub fn run_hook() {
             agent: "claude".into(),
             event,
             message,
+            session: None,
         });
     }
 }
