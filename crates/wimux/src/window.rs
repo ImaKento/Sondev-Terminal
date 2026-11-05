@@ -51,6 +51,7 @@ gpui_kit::actions!(
         SelectWorkspace8,
         SelectWorkspace9,
         OpenDirPicker,
+        OpenCondaPicker,
         ZoomIn,
         ZoomOut,
         ZoomReset,
@@ -1401,12 +1402,22 @@ impl WimuxWindow {
 
     /// Ctrl+Shift+G: ターミナルで `cdi` を実行する（フォルダ履歴をターミナル内で選ぶ）
     fn open_dir_picker(&mut self, _: &OpenDirPicker, _: &mut Window, cx: &mut Context<Self>) {
+        self.run_in_shell("cdi\r", cx);
+    }
+
+    /// Ctrl+Shift+A: ターミナルで `clist` を実行する（conda の環境を選んで有効にする）
+    fn open_conda_picker(&mut self, _: &OpenCondaPicker, _: &mut Window, cx: &mut Context<Self>) {
+        self.run_in_shell("clist\r", cx);
+    }
+
+    /// フォーカス中のターミナルに、シェル連携のコマンドを打ち込む
+    fn run_in_shell(&mut self, line: &str, cx: &mut Context<Self>) {
         if let Some(view) = self
             .focused_pane()
             .and_then(|id| self.panes.get(&id))
             .and_then(|p| p.view.clone())
         {
-            view.update(cx, |v, _| v.send_text("cdi\r"));
+            view.update(cx, |v, _| v.send_text(line));
         }
     }
 
@@ -4348,6 +4359,7 @@ impl Render for WimuxWindow {
             .on_action(cx.listener(Self::select_ws_8))
             .on_action(cx.listener(Self::select_ws_9))
             .on_action(cx.listener(Self::open_dir_picker))
+            .on_action(cx.listener(Self::open_conda_picker))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
