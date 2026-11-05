@@ -104,6 +104,39 @@ fn agent_label(name: &str) -> Option<&'static str> {
     })
 }
 
+/// 表示名 → シェルのコマンド名（session.json に保存する名前）
+fn agent_command(label: &str) -> Option<&'static str> {
+    Some(match label {
+        "Codex" => "codex",
+        "Gemini" => "gemini",
+        "Aider" => "aider",
+        "OpenCode" => "opencode",
+        "Copilot" => "copilot",
+        "Cursor" => "cursor-agent",
+        "Qwen" => "qwen",
+        "Amp" => "amp",
+        "Crush" => "crush",
+        "Goose" => "goose",
+        "Kiro" => "kiro-cli",
+        _ => return None,
+    })
+}
+
+/// Claude 以外のエージェントの、前回の会話を再開するコマンド（再開の方法が分かるものだけ）
+fn agent_resume_command(command: &str, session: Option<&str>) -> Option<String> {
+    Some(match command {
+        "codex" => match session {
+            Some(id) => format!("codex resume {id}"),
+            // そのフォルダでいちばん新しい会話
+            None => "codex resume --last".into(),
+        },
+        "opencode" => "opencode --continue".into(),
+        "copilot" => "copilot --continue".into(),
+        "gemini" => "gemini --resume latest".into(),
+        _ => return None,
+    })
+}
+
 /// 通知・サイドバーに出すエージェント名
 fn agent_title(agent: Option<&'static str>) -> &'static str {
     match agent {
@@ -265,8 +298,9 @@ struct Pane {
     activity_driven: bool,
     working_since: Option<Instant>,
     asking_since: Option<Instant>,
-    /// 前回のセッションから引き継いだ Claude Code のセッション ID（このペインでまだ再開していない場合に使う）
-    claude_session: Option<String>,
+    /// エージェントのセッション ID。Claude Code は前回から引き継いだもの（このペインでまだ再開していない
+    /// 場合に使う）、Codex は notify から届いた thread-id
+    agent_session: Option<String>,
     /// git のブランチ名（cwd から .git/HEAD を読む）
     branch: Option<String>,
     /// 見ていない間に通知があった（ペインに青い枠を付ける）
@@ -314,7 +348,7 @@ impl Pane {
             activity_driven: false,
             working_since: None,
             asking_since: None,
-            claude_session: None,
+            agent_session: None,
             branch: None,
             attention: false,
             prompted: false,
@@ -367,21 +401,21 @@ pub struct WimuxWindow {
     resizing: bool,
     /// アップデートの状態（サイドバーの下にお知らせを出す）
     update: UpdateState,
-    /// Claude の利用上限（5 時間枠・週）。Sondev で起動した Claude のステータスラインから届く
-    claude_usage: ClaudeUsage,
+    /// 利用上限（5 時間枠・週）。Claude のステータスライン・Codex の notify から届く（届いた順）
+    usage: Vec<(&'static str, AgentUsage)>,
     /// 利用上限の「あと何分」を描き直した分（1 分ごとに描き直す）
     usage_minute: i64,
     _subs: Vec<Subscription>,
 }
 
-/// Claude の利用上限（届いた最新の値）
+/// エージェントの利用上限（届いた最新の値）
 #[derive(Debug, Clone, Copy, Default)]
-struct ClaudeUsage {
+struct AgentUsage {
     five_hour: Option<crate::ipc::LimitWindow>,
     seven_day: Option<crate::ipc::LimitWindow>,
 }
 
-impl ClaudeUsage {
+impl AgentUsage {
     fn any(&self) -> bool {
         self.five_hour.is_some() || self.seven_day.is_some()
     }
@@ -432,7 +466,7 @@ impl WimuxWindow {
             resizing: false,
             focus_handle: cx.focus_handle(),
             update: UpdateState::None,
-            claude_usage: ClaudeUsage::default(),
+            usage: Vec::new(),
             usage_minute: 0,
             _subs: Vec::new(),
         };
@@ -2062,15 +2096,25 @@ impl WimuxWindow {
         };
         match msg.message {
             Message::Usage {
+                agent,
                 five_hour,
                 seven_day,
             } => {
+                let label = agent.as_deref().and_then(agent_label).unwrap_or(CLAUDE);
+                let i = match self.usage.iter().position(|(l, _)| *l == label) {
+                    Some(i) => i,
+                    None => {
+                        self.usage.push((label, AgentUsage::default()));
+                        self.usage.len() - 1
+                    }
+                };
+                let usage = &mut self.usage[i].1;
                 // 届いた枠だけ新しくする（無い枠は戻る時刻を過ぎたら表示から消える）
                 if five_hour.is_some() {
-                    self.claude_usage.five_hour = five_hour;
+                    usage.five_hour = five_hour;
                 }
                 if seven_day.is_some() {
-                    self.claude_usage.seven_day = seven_day;
+                    usage.seven_day = seven_day;
                 }
             }
             Message::Notify { title, body } => {
@@ -2081,12 +2125,16 @@ impl WimuxWindow {
                 agent,
                 event,
                 message,
+                session,
             } => {
                 let label = agent_label(&agent).unwrap_or("Agent");
                 let Some(pane) = self.panes.get_mut(&id) else {
                     return;
                 };
                 pane.agent = Some(label);
+                if let Some(s) = session.filter(|s| crate::claude_session::valid_id(s)) {
+                    pane.agent_session = Some(s);
+                }
                 // Claude Code はフックで状態がすべて分かる。Codex の notify は「完了」だけ
                 if label == CLAUDE {
                     pane.hooked = true;
@@ -2181,7 +2229,7 @@ impl WimuxWindow {
         }
         // 利用上限の「あと何分」は 1 分ごとに描き直す
         let minute = crate::hooks::now_secs() / 60;
-        if self.claude_usage.any() && minute != self.usage_minute {
+        if self.usage.iter().any(|(_, u)| u.any()) && minute != self.usage_minute {
             self.usage_minute = minute;
             changed = true;
         }
@@ -2344,6 +2392,10 @@ impl WimuxWindow {
 
     fn pane_state(&self, id: PaneId) -> PaneState {
         let pane = self.panes.get(&id);
+        // Claude 以外の、動いているエージェントのコマンド名
+        let other_agent = pane
+            .filter(|p| p.state != AgentState::None)
+            .and_then(|p| agent_command(p.agent?));
         PaneState {
             cwd: pane.and_then(|p| p.cwd.clone()),
             conda: pane.and_then(|p| p.conda.clone()),
@@ -2353,8 +2405,10 @@ impl WimuxWindow {
                 .filter(|p| p.agent == Some(CLAUDE) && p.state != AgentState::None)
                 .and_then(|p| {
                     crate::claude_session::read(&crate::claude_session::pane_key(id))
-                        .or_else(|| p.claude_session.clone())
+                        .or_else(|| p.agent_session.clone())
                 }),
+            agent: other_agent.map(str::to_string),
+            agent_session: other_agent.and(pane.and_then(|p| p.agent_session.clone())),
             url: pane.and_then(|p| p.url.clone()),
         }
     }
@@ -2449,12 +2503,39 @@ impl WimuxWindow {
                 Some(s) => format!("claude --resume {s}"),
                 None => "claude --continue".into(),
             });
-            pane.claude_session = session;
+            pane.agent_session = session;
+        }
+        // Codex など: 再開の方法が分かるものだけ
+        let other = p
+            .agent
+            .as_deref()
+            .filter(|_| !p.claude)
+            .and_then(|cmd| Some((cmd, agent_label(cmd)?)))
+            .filter(|(_, label)| *label != CLAUDE);
+        let mut other_restored = false;
+        if let Some((cmd, _)) = other
+            && self.settings.restore_claude
+            && restore_claude_enabled()
+        {
+            let session = p
+                .agent_session
+                .clone()
+                .filter(|s| crate::claude_session::valid_id(s));
+            if let Some(line) = agent_resume_command(cmd, session.as_deref()) {
+                pane.restore_cmds.push(line);
+                pane.agent_session = session;
+                other_restored = true;
+            }
         }
         // 起動前でも状態を保持しておく（開かずに終了しても失われないように）
         pane.conda = p.conda;
-        pane.agent = p.claude.then_some(CLAUDE);
-        pane.state = if p.claude {
+        pane.agent = if p.claude {
+            Some(CLAUDE)
+        } else {
+            other.filter(|_| other_restored).map(|(_, label)| label)
+        };
+        pane.activity_driven = pane.agent.is_some_and(|a| a != CLAUDE);
+        pane.state = if pane.agent.is_some() {
             AgentState::Idle
         } else {
             AgentState::None
@@ -2829,7 +2910,7 @@ impl WimuxWindow {
                     .children(items),
             )
             .children(self.render_update_notice(cx))
-            .children(self.render_claude_usage())
+            .children(self.render_usage())
             .child(
                 div()
                     .flex()
@@ -2908,21 +2989,25 @@ impl WimuxWindow {
         .detach();
     }
 
-    /// サイドバーの下の、Claude の利用上限（5 時間枠・週）の棒
-    fn render_claude_usage(&self) -> Option<AnyElement> {
+    /// サイドバーの下の、Claude・Codex の利用上限（5 時間枠・週）の棒
+    fn render_usage(&self) -> Option<AnyElement> {
         let now = crate::hooks::now_secs();
-        let rows: Vec<(&str, crate::ipc::LimitWindow)> = [
-            ("5時間", self.claude_usage.five_hour),
-            ("週", self.claude_usage.seven_day),
-        ]
-        .into_iter()
-        .filter_map(|(label, w)| Some((label, w.filter(|w| w.resets_at > now)?)))
-        .collect();
+        let rows: Vec<(String, crate::ipc::LimitWindow)> = self
+            .usage
+            .iter()
+            .flat_map(|(agent, u)| {
+                [
+                    (format!("{agent} 5時間"), u.five_hour),
+                    (format!("{agent} 週"), u.seven_day),
+                ]
+            })
+            .filter_map(|(label, w)| Some((label, w.filter(|w| w.resets_at > now)?)))
+            .collect();
         if rows.is_empty() {
             return None;
         }
         let c = th();
-        let row = |label: &str, w: crate::ipc::LimitWindow| {
+        let row = |label: String, w: crate::ipc::LimitWindow| {
             let pct = w.used_percentage.clamp(0., 100.);
             let color = if pct >= 90. {
                 c.red
@@ -2943,7 +3028,7 @@ impl WimuxWindow {
                         .child(
                             div()
                                 .text_color(rgb(c.text_dim))
-                                .child(format!("Claude {label}  {pct:.0}%")),
+                                .child(format!("{label}  {pct:.0}%")),
                         )
                         .child(
                             div()
@@ -3545,7 +3630,7 @@ impl WimuxWindow {
                             .gap(px(16.))
                             .child(row(
                                 "起動時に会話を再開する",
-                                "前回 Claude Code を開いていたペインで、そのペインのセッションを再開します（claude --resume）",
+                                "前回 Claude Code・Codex などを開いていたペインで、その会話を再開します（claude --resume / codex resume）",
                             ))
                             .child(toggle),
                     )

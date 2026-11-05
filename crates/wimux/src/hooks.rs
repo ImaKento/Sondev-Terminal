@@ -51,11 +51,26 @@ pub fn run_codex_notify(args: &[String]) {
     else {
         return;
     };
-    if let Some((event, message)) = codex_event(&v) {
-        ipc::send(Message::Agent {
-            agent: "codex".into(),
-            event,
-            message,
+    let Some((event, message)) = codex_event(&v) else {
+        return;
+    };
+    let session = v
+        .get("thread-id")
+        .and_then(|t| t.as_str())
+        .filter(|t| crate::claude_session::valid_id(t))
+        .map(str::to_string);
+    ipc::send(Message::Agent {
+        agent: "codex".into(),
+        event,
+        message,
+        session: session.clone(),
+    });
+    // 利用上限は Codex の会話の記録（rollout）に残っている
+    if let Some((five_hour, seven_day)) = codex_usage(session.as_deref()) {
+        ipc::send(Message::Usage {
+            agent: Some("codex".into()),
+            five_hour,
+            seven_day,
         });
     }
 }
@@ -72,6 +87,111 @@ fn codex_event(v: &Value) -> Option<(AgentEvent, Option<String>)> {
     }
 }
 
+type Windows = (Option<ipc::LimitWindow>, Option<ipc::LimitWindow>);
+
+/// Codex の利用上限。`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<時刻>-<thread-id>.jsonl` の
+/// 最後の `token_count` の `rate_limits`（primary / secondary）を読む
+fn codex_usage(thread: Option<&str>) -> Option<Windows> {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|h| std::path::PathBuf::from(h).join(".codex"))
+        })?;
+    let file = find_rollout(&home.join("sessions"), thread)?;
+    let text = read_tail(&file, 512 * 1024)?;
+    text.lines().rev().find_map(codex_rate_limits)
+}
+
+/// その会話の記録のファイル（分からなければいちばん新しいもの）。新しい日付のフォルダから探す
+fn find_rollout(sessions: &std::path::Path, thread: Option<&str>) -> Option<std::path::PathBuf> {
+    let sorted_desc = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(dir)
+            .map(|r| r.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v.reverse();
+        v
+    };
+    for year in sorted_desc(sessions).into_iter().filter(|p| p.is_dir()) {
+        for month in sorted_desc(&year).into_iter().filter(|p| p.is_dir()) {
+            for day in sorted_desc(&month).into_iter().filter(|p| p.is_dir()) {
+                let files: Vec<_> = sorted_desc(&day)
+                    .into_iter()
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+                    })
+                    .collect();
+                let hit = match thread {
+                    Some(t) => files.into_iter().find(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.ends_with(&format!("{t}.jsonl")))
+                    }),
+                    // ファイル名は時刻順なので、名前の大きいものが新しい
+                    None => files.into_iter().next(),
+                };
+                if hit.is_some() {
+                    return hit;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// ファイルの末尾（最大 `max` バイト）
+fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// 記録の 1 行（`{"type":"event_msg","payload":{"type":"token_count","rate_limits":{...}}}`）から
+/// 利用上限を取り出す。枠の長さ（`window_minutes`）が 1 日以下なら 5 時間枠、それより長ければ週
+fn codex_rate_limits(line: &str) -> Option<Windows> {
+    if !line.contains("\"token_count\"") || !line.contains("\"rate_limits\"") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    let p = v.get("payload")?;
+    if p.get("type")?.as_str()? != "token_count" {
+        return None;
+    }
+    let limits = p.get("rate_limits")?;
+    let (mut short, mut long) = (None, None);
+    for name in ["primary", "secondary"] {
+        let Some(w) = limits.get(name).filter(|w| !w.is_null()) else {
+            continue;
+        };
+        let Some(used) = w.get("used_percent").and_then(|u| u.as_f64()) else {
+            continue;
+        };
+        let minutes = w.get("window_minutes").and_then(|m| m.as_i64());
+        let Some(resets_at) = w.get("resets_at").and_then(|r| r.as_i64()) else {
+            continue;
+        };
+        let window = Some(ipc::LimitWindow {
+            used_percentage: used,
+            resets_at,
+        });
+        match minutes {
+            Some(m) if m > 24 * 60 => long = window,
+            Some(_) => short = window,
+            None if name == "primary" => short = window,
+            None => long = window,
+        }
+    }
+    (short.is_some() || long.is_some()).then_some((short, long))
+}
+
 /// `sondev.exe --claude-statusline`: Claude Code のステータスラインとして呼ばれる。
 /// 標準入力の JSON から利用上限（5 時間枠・週）を取り出して本体へ送り、
 /// Claude Code の画面の下に出す 1 行（モデル名と使用率）を書く
@@ -85,6 +205,7 @@ pub fn run_statusline() {
     let (five_hour, seven_day) = rate_limits(&v);
     if five_hour.is_some() || seven_day.is_some() {
         ipc::send(Message::Usage {
+            agent: None,
             five_hour,
             seven_day,
         });
@@ -191,8 +312,36 @@ fn shorten(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentEvent, claude_event, codex_event, rate_limits, shorten, statusline_text, until_reset,
+        AgentEvent, claude_event, codex_event, codex_rate_limits, find_rollout, rate_limits,
+        shorten, statusline_text, until_reset,
     };
+
+    #[test]
+    fn codex_usage() {
+        let line = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","primary":{"used_percent":12.5,"window_minutes":300,"resets_at":2000},"secondary":{"used_percent":40.0,"window_minutes":10080,"resets_at":9000},"credits":null,"plan_type":"plus"}}}"#;
+        let (f, s) = codex_rate_limits(line).unwrap();
+        assert_eq!(f.unwrap().used_percentage, 12.5);
+        assert_eq!(s.unwrap().resets_at, 9000);
+        // 週の枠だけ（無料プランなど）
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":5.0,"window_minutes":10080,"resets_at":1},"secondary":null}}}"#;
+        let (f, s) = codex_rate_limits(line).unwrap();
+        assert!(f.is_none() && s.is_some());
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}"#;
+        assert!(codex_rate_limits(line).is_none());
+
+        let dir = std::env::temp_dir().join(format!("wimux-codex-{}", std::process::id()));
+        let day = dir.join("2026/11/05");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::create_dir_all(dir.join("2026/10/01")).unwrap();
+        let old = dir.join("2026/10/01/rollout-2026-10-01T10-00-00-aaa.jsonl");
+        let new = day.join("rollout-2026-11-05T10-00-00-bbb.jsonl");
+        std::fs::write(&old, "").unwrap();
+        std::fs::write(&new, "").unwrap();
+        assert_eq!(find_rollout(&dir, Some("aaa")), Some(old));
+        assert_eq!(find_rollout(&dir, None), Some(new));
+        assert_eq!(find_rollout(&dir, Some("zzz")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn statusline() {

@@ -35,10 +35,12 @@ GPU で描画するネイティブアプリ（GPUI ＋ alacritty_terminal ＋ Co
 - Claude Code はフックで状態を正確に受け取ります（シェルの `claude` から起動するだけで有効）
 - **Claude の利用上限（5 時間枠・週）** をサイドバーの下に棒で表示します（何 % 使ったか・あと何時間で戻るか。70% で黄、90% で赤）。Pro / Max などのサブスクリプションで、Sondev から `claude` を起動して最初の応答があると出ます
   - ご自身で Claude Code のステータスラインを設定している場合は、それを消さないように表示しません
+- **Codex の利用上限（5 時間枠・週）** も同じように出ます（Sondev から `codex` を起動して、応答が終わるたびに Codex の記録から読みます）
 
 ### 閉じても、そのまま続きから
 - ワークスペース・分割・タブ、各ペインのフォルダ・conda 環境を自動で保存し、次の起動で元に戻します
 - Claude Code を使っていたペインは、**そのペインの会話を `claude --resume` で再開**します
+- Codex は `codex resume <ID>`（ID が分からなければ `codex resume --last`）、OpenCode / Copilot は `--continue`、Gemini は `--resume latest` で再開します
 - ウィンドウの位置・大きさも覚えています
 
 ### ブラウザも同じ画面で
