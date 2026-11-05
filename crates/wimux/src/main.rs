@@ -33,6 +33,8 @@ fn main() {
     match args.first().map(String::as_str) {
         // Claude Code のフック
         Some("--claude-hook") => return claude_session::run_hook(),
+        // Claude Code のステータスライン（利用上限を本体へ送る）
+        Some("--claude-statusline") => return hooks::run_statusline(),
         // Codex CLI の notify（最後の引数が JSON）
         Some("--codex-notify") => return hooks::run_codex_notify(&args[1..]),
         // `sondev notify [--title <題>] <本文>`

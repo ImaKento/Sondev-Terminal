@@ -182,6 +182,7 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
   - Claude Code: シェル連携の `claude` 関数から起動すると、フック（SessionStart / UserPromptSubmit / PostToolUse / Notification / Stop / SessionEnd）が `sondev.exe --claude-hook` を呼び、`ipc.rs` 経由で本体に届く。フックが無いとき（直接 claude.exe を実行など）はタイトル・ベル・OSC 通知から推定
   - Codex / Gemini / Aider / OpenCode / Copilot など: シェル連携のラッパー関数が起動時に `WIMUX_AGENT` を送り、出力の動き（2 秒止まったら待機中）で推定。ベル・OSC 9 / 777 の通知は入力待ち。Codex は `-c notify=[sondev.exe, --codex-notify]` を付けて起動し、応答の完了を正確に受け取る（config.toml に notify があればそちらを優先）
   - 入力待ちのあとにキーを押したら「作業中」に戻す
+- Claude の利用上限（5 時間枠・週）: フック設定（`--settings`）に `statusLine`（`sondev.exe --claude-statusline`）を入れ、ステータスラインの入力の `rate_limits.five_hour` / `seven_day`（`used_percentage`・`resets_at`）を `ipc.rs` で本体へ送る。サイドバーの下に棒で表示（70% 以上は黄、90% 以上は赤）し、Claude の画面の下にも「モデル · 5h 23%（あと 2時間13分） · 週 41%」を出す。Pro / Max などのサブスクリプションで、最初の応答のあとにだけ届く。ユーザーが ~/.claude/settings.json に自分の statusLine を設定しているときは入れない（`--settings` が優先されて消してしまうため）
 - ファイルを開くエディタは settings.json の `editor`（例: `"code -g {file}:{line}:{col}"`）。未設定なら VS Code → Cursor → Windsurf → 既定のアプリ
 - Claude Code の再開: シェル連携の `claude` 関数が `--settings claude-hook-settings.json` を付けて起動し、SessionStart フック（`sondev.exe --claude-hook`）がペインごとのセッション ID を `claude-sessions\<WIMUX_PANE_ID>` に書く。保存時に読んで session.json に記録し、次回は `claude --resume <ID>`（ID が無ければ `--continue`）
 - conda の再開: base も含めて `conda activate` する（conda は遅延初期化なので base も自動では有効にならない）
@@ -236,6 +237,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - [x] `sondev notify` CLI ＋ Claude Code hooks 連携（127.0.0.1 の TCP ＋トークン。hooks の出力は端末に出ないため）
 - [x] Claude 以外のエージェント（Codex・Gemini・Aider など）の状態表示と完了通知
 - [x] 入力待ちのペインへ移動（Ctrl+Shift+U）
+- [x] Claude の利用上限（5 時間枠・週）の表示（ステータスライン経由）
 - [ ] git worktree 連携（ブランチごとのワークスペース作成・差分・PR・片付け）
 - [ ] ワークスペース単位で Claude 自動再開の ON/OFF
 

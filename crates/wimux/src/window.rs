@@ -367,7 +367,24 @@ pub struct WimuxWindow {
     resizing: bool,
     /// アップデートの状態（サイドバーの下にお知らせを出す）
     update: UpdateState,
+    /// Claude の利用上限（5 時間枠・週）。Sondev で起動した Claude のステータスラインから届く
+    claude_usage: ClaudeUsage,
+    /// 利用上限の「あと何分」を描き直した分（1 分ごとに描き直す）
+    usage_minute: i64,
     _subs: Vec<Subscription>,
+}
+
+/// Claude の利用上限（届いた最新の値）
+#[derive(Debug, Clone, Copy, Default)]
+struct ClaudeUsage {
+    five_hour: Option<crate::ipc::LimitWindow>,
+    seven_day: Option<crate::ipc::LimitWindow>,
+}
+
+impl ClaudeUsage {
+    fn any(&self) -> bool {
+        self.five_hour.is_some() || self.seven_day.is_some()
+    }
 }
 
 /// アップデートのお知らせ
@@ -415,6 +432,8 @@ impl WimuxWindow {
             resizing: false,
             focus_handle: cx.focus_handle(),
             update: UpdateState::None,
+            claude_usage: ClaudeUsage::default(),
+            usage_minute: 0,
             _subs: Vec::new(),
         };
 
@@ -2042,6 +2061,18 @@ impl WimuxWindow {
             return;
         };
         match msg.message {
+            Message::Usage {
+                five_hour,
+                seven_day,
+            } => {
+                // 届いた枠だけ新しくする（無い枠は戻る時刻を過ぎたら表示から消える）
+                if five_hour.is_some() {
+                    self.claude_usage.five_hour = five_hour;
+                }
+                if seven_day.is_some() {
+                    self.claude_usage.seven_day = seven_day;
+                }
+            }
             Message::Notify { title, body } => {
                 let title = title.unwrap_or_else(|| "通知".into());
                 self.notify_pane(id, &title, &body, window);
@@ -2147,6 +2178,12 @@ impl WimuxWindow {
         }
         for (id, title) in finished {
             self.notify_pane(id, title, "応答が終わりました", window);
+        }
+        // 利用上限の「あと何分」は 1 分ごとに描き直す
+        let minute = crate::hooks::now_secs() / 60;
+        if self.claude_usage.any() && minute != self.usage_minute {
+            self.usage_minute = minute;
+            changed = true;
         }
         if changed {
             cx.notify();
@@ -2792,6 +2829,7 @@ impl WimuxWindow {
                     .children(items),
             )
             .children(self.render_update_notice(cx))
+            .children(self.render_claude_usage())
             .child(
                 div()
                     .flex()
@@ -2868,6 +2906,76 @@ impl WimuxWindow {
             });
         })
         .detach();
+    }
+
+    /// サイドバーの下の、Claude の利用上限（5 時間枠・週）の棒
+    fn render_claude_usage(&self) -> Option<AnyElement> {
+        let now = crate::hooks::now_secs();
+        let rows: Vec<(&str, crate::ipc::LimitWindow)> = [
+            ("5時間", self.claude_usage.five_hour),
+            ("週", self.claude_usage.seven_day),
+        ]
+        .into_iter()
+        .filter_map(|(label, w)| Some((label, w.filter(|w| w.resets_at > now)?)))
+        .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let c = th();
+        let row = |label: &str, w: crate::ipc::LimitWindow| {
+            let pct = w.used_percentage.clamp(0., 100.);
+            let color = if pct >= 90. {
+                c.red
+            } else if pct >= 70. {
+                c.amber
+            } else {
+                c.accent
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .text_size(px(11.))
+                        .child(
+                            div()
+                                .text_color(rgb(c.text_dim))
+                                .child(format!("Claude {label}  {pct:.0}%")),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(c.text_faint))
+                                .child(crate::hooks::until_reset(w.resets_at, now)),
+                        ),
+                )
+                .child(
+                    div()
+                        .h(px(4.))
+                        .w_full()
+                        .rounded(px(2.))
+                        .bg(rgb(c.hover_bg_strong))
+                        .child(
+                            div()
+                                .h_full()
+                                .rounded(px(2.))
+                                .w(relative((pct / 100.) as f32))
+                                .bg(rgb(color)),
+                        ),
+                )
+        };
+        Some(
+            div()
+                .mx(px(12.))
+                .mb(px(4.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .children(rows.into_iter().map(|(l, w)| row(l, w)))
+                .into_any_element(),
+        )
     }
 
     /// サイドバーの下のお知らせ「新しいバージョン vX があります ［更新］」
