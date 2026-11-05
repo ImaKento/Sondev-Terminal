@@ -83,18 +83,72 @@ pub struct PaneState {
     pub url: Option<String>,
 }
 
+/// 保存先のフォルダ名（`%APPDATA%\SondevTerminal`・`%LOCALAPPDATA%\SondevTerminal`）。
+/// 空白を入れないのは、フックのコマンドなどに埋め込むときに引用で壊れないようにするため
+pub const DIR_NAME: &str = "SondevTerminal";
+/// 以前の保存先のフォルダ名（開発名）。起動時に `DIR_NAME` へ移す（`migrate_dirs`）
+const OLD_DIR_NAME: &str = "wimux";
+
+/// 設定・セッションの保存先（`%APPDATA%\SondevTerminal`）。`WIMUX_CONFIG_DIR` で変えられる
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("WIMUX_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
+    pick_dir(&roaming_parent())
+}
+
+/// 設定を置く親フォルダ（Windows は %APPDATA%）
+fn roaming_parent() -> PathBuf {
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        return PathBuf::from(appdata).join("wimux");
+        return PathBuf::from(appdata);
     }
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("wimux");
+        return PathBuf::from(xdg);
     }
     let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".config").join("wimux")
+    PathBuf::from(home).join(".config")
+}
+
+/// ブラウザのデータなど大きいものを置く親フォルダ（Windows は %LOCALAPPDATA%）
+pub fn local_parent() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(roaming_parent)
+}
+
+/// 親フォルダの中の保存先。新しい名前のフォルダがまだ無く、古い名前（wimux）のものがあれば
+/// そちらを使う（移せなかったとき。前の設定を失わないように）
+pub fn pick_dir(parent: &Path) -> PathBuf {
+    let new = parent.join(DIR_NAME);
+    let old = parent.join(OLD_DIR_NAME);
+    if !new.exists() && old.is_dir() {
+        old
+    } else {
+        new
+    }
+}
+
+/// 古い保存先（`wimux`）を新しい名前（`SondevTerminal`）に移す。起動時に 1 回だけ呼ぶ。
+/// 移せなかったとき（古い版が起動中でファイルが使われているなど）は古い場所をそのまま使う
+pub fn migrate_dirs() {
+    if std::env::var_os("WIMUX_CONFIG_DIR").is_none() {
+        migrate_dir(&roaming_parent());
+    }
+    migrate_dir(&local_parent());
+}
+
+fn migrate_dir(parent: &Path) {
+    let old = parent.join(OLD_DIR_NAME);
+    let new = parent.join(DIR_NAME);
+    if old.is_dir() && !new.exists() {
+        match std::fs::rename(&old, &new) {
+            Ok(()) => log::info!("保存先を移しました: {} → {}", old.display(), new.display()),
+            Err(e) => log::warn!(
+                "保存先を移せませんでした（{} のまま使います）: {e}",
+                old.display()
+            ),
+        }
+    }
 }
 
 pub fn session_path() -> PathBuf {
@@ -134,6 +188,27 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrates_old_dir() {
+        let parent =
+            std::env::temp_dir().join(format!("wimux-migrate-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(parent.join(OLD_DIR_NAME)).unwrap();
+        std::fs::write(parent.join(OLD_DIR_NAME).join("settings.json"), "{}").unwrap();
+        // 移す前は古い場所を使う
+        assert_eq!(pick_dir(&parent), parent.join(OLD_DIR_NAME));
+        migrate_dir(&parent);
+        assert!(parent.join(DIR_NAME).join("settings.json").is_file());
+        assert!(!parent.join(OLD_DIR_NAME).exists());
+        assert_eq!(pick_dir(&parent), parent.join(DIR_NAME));
+        // 新しい場所がもうあれば何もしない
+        std::fs::create_dir_all(parent.join(OLD_DIR_NAME)).unwrap();
+        migrate_dir(&parent);
+        assert!(parent.join(OLD_DIR_NAME).is_dir());
+        assert_eq!(pick_dir(&parent), parent.join(DIR_NAME));
+        let _ = std::fs::remove_dir_all(&parent);
+    }
 
     #[test]
     fn roundtrip() {

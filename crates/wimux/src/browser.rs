@@ -458,10 +458,7 @@ mod host {
 
 /// ブラウザのデータ（Cookie など）の保存先
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(crate::session::config_dir);
-    base.join("wimux").join("WebView2")
+    crate::session::pick_dir(&crate::session::local_parent()).join("WebView2")
 }
 
 /// 起動時の準備。`cdp_port` を指定すると、AI（Playwright / Chrome DevTools MCP など）から

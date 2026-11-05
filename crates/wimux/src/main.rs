@@ -40,6 +40,8 @@ fn main() {
         _ => {}
     }
     env_logger::init();
+    // 保存先を以前の名前（wimux）から SondevTerminal へ移す（初回だけ）
+    session::migrate_dirs();
     // フック・通知の受け口（ペインの環境変数 WIMUX_IPC で場所を渡す）
     ipc::start();
     claude_session::cleanup();
