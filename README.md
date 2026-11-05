@@ -94,7 +94,7 @@ winget install Sondev.SondevTerminal
 Claude にブラウザを操作させる機能を使うときだけ、Node.js（`npx`）が必要です。
 
 シェルは PowerShell 7（`pwsh`）があればそれを、なければ Windows PowerShell を使います。
-シェル連携（フォルダ・conda の通知、`claude` / `cdi` / `clist` / `web` などの関数）は自動で読み込まれます。
+シェル連携（フォルダ・conda の通知、`claude` / `cdi` / `clist` / `dlist` / `web` などの関数）は自動で読み込まれます。
 
 ---
 
