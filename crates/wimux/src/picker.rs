@@ -12,8 +12,10 @@ use crate::dirs::DirHistory;
 use crate::theme::*;
 
 const MAX_RESULTS: usize = 12;
-/// コマンドパレットに一度に出す数
+/// コマンドパレットの一覧の高さ（この行数を超えるとスクロールする）
 const MAX_COMMANDS: usize = 14;
+/// コマンドパレットの 1 行の高さ（行 30px ＋ 行間 1px）
+const COMMAND_ROW: f32 = 31.;
 
 #[derive(Debug, Clone)]
 pub enum PickerKind {
@@ -50,6 +52,8 @@ pub struct Picker {
     results: Vec<String>,
     /// コマンドパレットで絞り込んだ結果（`PickerKind::Commands` の何番目か）
     commands: Vec<usize>,
+    /// コマンドパレットの一覧のスクロール（選んでいる行が見えるように動かす）
+    scroll: ScrollHandle,
     selected: usize,
 }
 
@@ -75,6 +79,7 @@ impl Picker {
             marked_text: None,
             results: Vec::new(),
             commands: Vec::new(),
+            scroll: ScrollHandle::new(),
             selected: 0,
         };
         this.refresh(history);
@@ -183,6 +188,10 @@ impl Picker {
             "v" if ctrl => self.paste(cx),
             "insert" if ks.modifiers.shift => self.paste(cx),
             _ => return,
+        }
+        // 選んでいる行が一覧の外に出たらスクロールして見せる
+        if matches!(self.kind, PickerKind::Commands(_)) {
+            self.scroll.scroll_to_item(self.selected);
         }
         cx.stop_propagation();
         cx.notify();
@@ -297,7 +306,6 @@ impl Render for Picker {
                 .iter()
                 .enumerate()
                 .filter_map(|(row, i)| Some((row, items.get(*i)?)))
-                .take(MAX_COMMANDS)
                 .map(|(row, c)| {
                     let selected = row == self.selected;
                     div()
@@ -393,10 +401,15 @@ impl Render for Picker {
             .when(is_commands, |el| {
                 el.child(
                     div()
+                        .id("command-list")
                         .flex()
                         .flex_col()
                         .gap(px(1.))
                         .p(px(6.))
+                        // 全部は入らないので、決まった高さでスクロールさせる（マウスのホイールでも動く）
+                        .max_h(px(MAX_COMMANDS as f32 * COMMAND_ROW + 12.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
                         .children(command_rows)
                         .when(no_commands, |el| {
                             el.child(
