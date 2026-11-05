@@ -53,6 +53,7 @@ GPU で描画するネイティブアプリ（GPUI ＋ alacritty_terminal ＋ Co
 - URL・ファイルパスを **Ctrl+クリック** で開く（`src/main.rs:42:7` ならエディタでその行へ）
 - 日本語入力（IME）、全角文字、24bit カラー
 - フォルダ履歴からの移動（`cdi`、fzf 対応）
+- conda の環境を一覧から選んで有効にする（`clist`。`conda info -e` → `conda activate` の代わり）
 - テーマ・フォント・文字サイズ・行の高さ・カーソル・背景の透過を設定画面から変更
 - コマンドパレット（Ctrl+Shift+P）で、すべての操作を名前で探して実行
 - キー割り当ては settings.json で変更できます
@@ -91,7 +92,7 @@ winget install Sondev.SondevTerminal
 Claude にブラウザを操作させる機能を使うときだけ、Node.js（`npx`）が必要です。
 
 シェルは PowerShell 7（`pwsh`）があればそれを、なければ Windows PowerShell を使います。
-シェル連携（フォルダ・conda の通知、`claude` / `cdi` / `web` などの関数）は自動で読み込まれます。
+シェル連携（フォルダ・conda の通知、`claude` / `cdi` / `clist` / `web` などの関数）は自動で読み込まれます。
 
 ---
 
@@ -110,6 +111,7 @@ Claude にブラウザを操作させる機能を使うときだけ、Node.js（
 | `claude` | Claude Code を起動（状態の表示・会話の再開・ブラウザ操作が自動で有効） |
 | `codex` / `gemini` / `aider` など | そのエージェントを起動（状態の表示と完了の通知が有効） |
 | `cdi [キーワード]` | よく行くフォルダの履歴から選んで移動 |
+| `clist [キーワード]` | conda の環境を一覧から選んで有効にする（今の環境には `*`） |
 | `web [URL / ポート / 検索語]` | 同じ区画にブラウザのタブを開く（`web 3000` → localhost:3000、`web github.com`、`web rust 非同期`） |
 | `sondev notify [--title 題] 本文` | 通知を出す（例: `cargo build; sondev notify ビルド完了`） |
 
@@ -172,6 +174,7 @@ Claude Code の全画面表示や vim など、アプリがマウスを使うと
 | Ctrl+Shift+C / Ctrl+Shift+V | コピー / 貼り付け |
 | Ctrl+Enter / Shift+Enter | 改行（Claude Code の複数行入力など） |
 | Ctrl+Shift+G | フォルダ履歴から移動（`cdi`） |
+| Ctrl+Shift+A | conda の環境を選んで有効にする（`clist`） |
 | Ctrl+= / Ctrl+- / Ctrl+0 | 文字を大きく / 小さく / 元に戻す |
 
 ### そのほか

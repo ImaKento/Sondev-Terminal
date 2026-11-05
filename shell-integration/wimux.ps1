@@ -111,7 +111,7 @@ __wimux_conda_fix
 # Uses fzf (on PATH or bundled with the app), otherwise a small built-in picker.
 # The list is written by wimux to %APPDATA%\wimux\dirs.txt.
 # ---------------------------------------------------------------------------
-function global:__wimux_pick([string[]]$items, [string]$query) {
+function global:__wimux_pick([string[]]$items, [string]$query, [string]$name = "cdi", [string]$action = "cd") {
     $esc = [char]0x1b
     $max = 12
     $sel = 0
@@ -130,7 +130,7 @@ function global:__wimux_pick([string[]]$items, [string]$query) {
         $out = ""
         if ($lines -gt 0) { $out += "$esc[$($lines)A" }
         $out += "`r$esc[J"
-        $out += "$esc[36mcdi>$esc[0m $q$esc[90m  (Enter: cd / Esc: cancel)$esc[0m`n"
+        $out += "$esc[36m$name>$esc[0m $q$esc[90m  (Enter: $action / Esc: cancel)$esc[0m`n"
         if ($hits.Count -eq 0) {
             $out += "$esc[90m  (no match)$esc[0m`n"
         }
@@ -178,18 +178,8 @@ function global:__wimux_fzf {
     return $null
 }
 
-function global:cdi {
-    $dir = if ($env:WIMUX_CONFIG_DIR) { $env:WIMUX_CONFIG_DIR } else { Join-Path $env:APPDATA "SondevTerminal" }
-    $file = Join-Path $dir "dirs.txt"
-    if (-not (Test-Path -LiteralPath $file)) {
-        Write-Host "cdi: no history yet (move around with cd first)"
-        return
-    }
-    $items = @(Get-Content -LiteralPath $file -Encoding UTF8 | Where-Object {
-        $_ -and (Test-Path -LiteralPath $_ -PathType Container)
-    })
-    $query = $args -join " "
-
+# Pick one of $items with fzf (or the built-in picker). Returns $null when cancelled.
+function global:__wimux_select([string[]]$items, [string]$query, [string]$name, [string]$action) {
     $target = $null
     $fzf = __wimux_fzf
     if ($fzf) {
@@ -201,7 +191,7 @@ function global:cdi {
         try {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $fzf
-            $psi.Arguments = '--height 40% --reverse --prompt "cdi> "'
+            $psi.Arguments = '--height 40% --reverse --prompt "' + $name + '> "'
             if ($query) { $psi.Arguments += ' --query "' + ($query -replace '"', '') + '"' }
             $psi.UseShellExecute = $false
             $psi.RedirectStandardInput = $true
@@ -215,12 +205,104 @@ function global:cdi {
             $p.WaitForExit()
         } catch {
             # fzf could not be started: fall back to the built-in picker
-            $target = __wimux_pick $items $query
+            $target = __wimux_pick $items $query $name $action
         }
     } else {
-        $target = __wimux_pick $items $query
+        $target = __wimux_pick $items $query $name $action
     }
+    if ($target) { return $target }
+    return $null
+}
+
+function global:cdi {
+    $dir = if ($env:WIMUX_CONFIG_DIR) { $env:WIMUX_CONFIG_DIR } else { Join-Path $env:APPDATA "SondevTerminal" }
+    $file = Join-Path $dir "dirs.txt"
+    if (-not (Test-Path -LiteralPath $file)) {
+        Write-Host "cdi: no history yet (move around with cd first)"
+        return
+    }
+    $items = @(Get-Content -LiteralPath $file -Encoding UTF8 | Where-Object {
+        $_ -and (Test-Path -LiteralPath $_ -PathType Container)
+    })
+    $query = $args -join " "
+
+    $target = __wimux_select $items $query "cdi" "cd"
     if ($target) { Set-Location -LiteralPath $target }
+}
+
+# ---------------------------------------------------------------------------
+# clist: pick a conda environment and activate it (instead of `conda info -e`
+# followed by `conda activate <name>`).
+#   clist          -> pick from the list (the active one is marked with a trailing *)
+#   clist <words>  -> start with <words> as the filter
+# The list is read from the conda folders directly (fast; conda is not started):
+# <root>\envs\* and ~\.conda\environments.txt.
+# ---------------------------------------------------------------------------
+function global:__wimux_conda_envs {
+    $roots = @()
+    if ($global:__wimux_conda_root) { $roots += $global:__wimux_conda_root }
+    # CONDA_EXE is <root>\Scripts\conda.exe, or <root>\python.exe after __wimux_conda_fix
+    $exes = @($env:CONDA_EXE) + @(Get-Command conda.exe, conda.bat -CommandType Application -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Source })
+    foreach ($e in $exes) {
+        if (-not $e) { continue }
+        $d = Split-Path -Parent $e
+        if ((Split-Path -Leaf $e) -ne "python.exe") { $d = Split-Path -Parent $d }
+        $roots += $d
+    }
+    if ($env:WIMUX_CONDA_ROOT) { $roots += $env:WIMUX_CONDA_ROOT }
+    $roots = @($roots | Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ "conda-meta")) } |
+        ForEach-Object { (Resolve-Path -LiteralPath $_).ProviderPath.TrimEnd('\') } | Select-Object -Unique)
+
+    $paths = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $roots) {
+        $paths.Add($r)
+        $envs = Join-Path $r "envs"
+        if (Test-Path -LiteralPath $envs) {
+            Get-ChildItem -LiteralPath $envs -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "conda-meta") } |
+                ForEach-Object { $paths.Add($_.FullName) }
+        }
+    }
+    $txt = Join-Path $HOME ".conda\environments.txt"
+    if (Test-Path -LiteralPath $txt) {
+        Get-Content -LiteralPath $txt -Encoding UTF8 -ErrorAction SilentlyContinue |
+            Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ "conda-meta")) } |
+            ForEach-Object { $paths.Add($_.TrimEnd('\')) }
+    }
+
+    # name: "base" for a root, the folder name for <root>\envs\<name>, else the full path
+    $seen = @{}
+    $out = @()
+    foreach ($p in $paths) {
+        $key = $p.ToLower()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $parent = Split-Path -Parent $p
+        $name = $p
+        if ($roots -contains $p) {
+            $name = if ($roots[0] -eq $p) { "base" } else { $p }
+        } elseif ((Split-Path -Leaf $parent) -eq "envs" -and ($roots -contains (Split-Path -Parent $parent))) {
+            $name = Split-Path -Leaf $p
+        }
+        $out += [pscustomobject]@{ Name = $name; Path = $p }
+    }
+    return $out
+}
+
+function global:clist {
+    $envs = @(__wimux_conda_envs)
+    if ($envs.Count -eq 0) {
+        Write-Host "clist: no conda environments found (set `$env:WIMUX_CONDA_ROOT to the conda folder)"
+        return
+    }
+    $current = "$env:CONDA_PREFIX".TrimEnd('\').ToLower()
+    $items = @($envs | ForEach-Object {
+        if ($_.Path.ToLower() -eq $current) { "$($_.Name) *" } else { $_.Name }
+    })
+    $picked = __wimux_select $items ($args -join " ") "clist" "activate"
+    if (-not $picked) { return }
+    conda activate ($picked -replace '\s*\*$', '')
 }
 
 # ---------------------------------------------------------------------------

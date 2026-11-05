@@ -238,6 +238,12 @@ pub const COMMANDS: &[Command] = &[
         &["ctrl-shift-g"],
     ),
     cmd(
+        "conda_picker",
+        "wimux::OpenCondaPicker",
+        "conda の環境を選んで有効にする（clist）",
+        &["ctrl-shift-a"],
+    ),
+    cmd(
         "zoom_in",
         "wimux::ZoomIn",
         "文字を大きく",

@@ -55,7 +55,7 @@ wimux/
 │     ├─ osc.rs               # OSC スキャナ（cwd / UserVar / 通知）
 │     └─ colors.rs            # パレット・色解決
 └─ shell-integration/
-   └─ wimux.ps1               # PowerShell 連携（cwd・conda 送信、conda 遅延初期化、cdi）※ASCII のみ
+   └─ wimux.ps1               # PowerShell 連携（cwd・conda 送信、conda 遅延初期化、cdi・clist）※ASCII のみ
 ```
 
 保存先（`WIMUX_CONFIG_DIR` で変更可）:
@@ -111,6 +111,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | Ctrl+W / Ctrl+Shift+W | タブを閉じる（最後のタブなら区画も閉じる） |
 | Ctrl+Shift+L | 右に分割して、新しい区画を空のブラウザにする（URL 欄に入力して Enter）。ブラウザのタブを見ているときは、その URL 欄へ |
 | Ctrl+Shift+G / `cdi [キーワード]` | フォルダ履歴からターミナル内で選んで移動（fzf を使う。PATH になければインストーラー同梱の fzf.exe、それもなければ内蔵の選択画面） |
+| Ctrl+Shift+A / `clist [キーワード]` | conda の環境をターミナル内で選んで `conda activate`（cdi と同じ選択画面。一覧は conda を起動せず `<root>\envs\*` と `~\.conda\environments.txt` から作る） |
 | Ctrl+C | 文字を選択中ならコピー、そうでなければ ^C（中断） |
 | Ctrl+V | クリップボードに文字があれば貼り付け。画像だけ（スクショなど）のときは、Claude Code には Alt+V（画像の貼り付け）を送り、それ以外のアプリには Ctrl+V をそのまま送る |
 | Ctrl+Shift+C / Ctrl+Shift+V | コピー / 貼り付け |
