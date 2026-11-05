@@ -1,0 +1,6 @@
+# winget のマニフェスト（バージョン）。installer/winget.ps1 が {{...}} を埋めて dist/winget に書き出す
+PackageIdentifier: Sondev.SondevTerminal
+PackageVersion: {{VERSION}}
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

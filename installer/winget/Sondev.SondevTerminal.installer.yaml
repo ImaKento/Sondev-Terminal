@@ -1,0 +1,19 @@
+# winget のマニフェスト（インストーラー）。Inno Setup・ユーザー単位（管理者権限なし）
+PackageIdentifier: Sondev.SondevTerminal
+PackageVersion: {{VERSION}}
+InstallerType: inno
+Scope: user
+InstallModes:
+- interactive
+- silent
+- silentWithProgress
+UpgradeBehavior: install
+ReleaseDate: {{DATE}}
+Installers:
+- Architecture: x64
+  InstallerUrl: {{URL}}
+  InstallerSha256: {{SHA256}}
+  # Inno Setup の AppId（installer/wimux.iss）＋ "_is1"。アンインストール情報の名前
+  ProductCode: '{6F3C2A1E-8B7D-4E59-9A3F-2C1D5E7B9A40}_is1'
+ManifestType: installer
+ManifestVersion: 1.6.0

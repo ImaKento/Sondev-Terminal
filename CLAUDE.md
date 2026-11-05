@@ -80,6 +80,8 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 **リリース（GitHub Actions）**: Actions → Release → Run workflow でバージョン（例 `0.2.0`）を入れるか、`git tag v0.2.0 && git push origin v0.2.0`。
 Windows ランナーでインストーラーを作り、GitHub Releases に置く（バージョンはタグから決めるので Cargo.toml を上げるコミットは不要）。
 
+**winget**（`winget install Sondev.SondevTerminal`）: Release ワークフローが `installer/winget.ps1` で `installer/winget/*.yaml`（ひな形。`{{VERSION}}` などを埋める）から `dist/winget/` にマニフェストを作り、成果物に残す。リポジトリの Secrets に `WINGET_TOKEN`（public_repo 権限の GitHub トークン）があれば、wingetcreate で microsoft/winget-pkgs に PR を出す（プレリリースは出さない）。初回は Microsoft の人の審査がある。ProductCode は Inno Setup の AppId ＋ `_is1`。リポジトリが public で、Release のインストーラーが誰でもダウンロードできることが前提
+
 **CI**: PR と main へのマージでは Linux で fmt・test・`--cfg wimux_check` の型チェックだけ（軽い）。Windows のリリースビルドとインストーラー作成は、Actions → CI → Run workflow で手動実行したときだけ（Windows ランナーは分数が 2 倍で数えられ、1 回 20 分ほどかかるため）。
 
 - `installer/wimux.iss` … Inno Setup の設定。管理者権限なしで `%LOCALAPPDATA%\Programs\Sondev Terminal` に入る。`AppId` は変えない（アップデートの判定に使う）

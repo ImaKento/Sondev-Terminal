@@ -32,6 +32,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # winget への申請に使う（無ければ申請の手順を飛ばす）
+  WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
   CARGO_INCREMENTAL: "0"
 
 jobs:
@@ -100,3 +102,28 @@ jobs:
           if ("${{ inputs.prerelease }}" -eq "true" -or $v.Contains("-")) { $ghArgs += "--prerelease" }
           gh @ghArgs
           if ($LASTEXITCODE -ne 0) { throw "リリースを作れませんでした" }
+
+      # winget（microsoft/winget-pkgs）に、このバージョンを申請する。
+      # リポジトリの Secrets に WINGET_TOKEN（public_repo 権限の GitHub トークン）があるときだけ。
+      # wingetcreate がトークンの持ち主のアカウントに winget-pkgs を fork して PR を出す。
+      # プレリリースは申請しない
+      - name: winget のマニフェストを作る
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          ./installer/winget.ps1 -Version $v -Installer "dist/SondevTerminal-setup-$v.exe" -Repo "${{ github.repository }}"
+
+      - name: winget のマニフェストを残す
+        uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifests-${{ steps.ver.outputs.version }}
+          path: dist/winget/
+
+      - name: winget に申請する
+        if: ${{ env.WINGET_TOKEN != '' && !contains(steps.ver.outputs.version, '-') && inputs.prerelease != true }}
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -UseBasicParsing https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          $v = "${{ steps.ver.outputs.version }}"
+          .\wingetcreate.exe submit --prtitle "New version: Sondev.SondevTerminal version $v" --token $env:WINGET_TOKEN dist/winget
+          if ($LASTEXITCODE -ne 0) { throw "winget に申請できませんでした" }
