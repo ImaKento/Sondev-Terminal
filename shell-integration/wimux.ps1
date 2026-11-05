@@ -382,6 +382,91 @@ foreach ($__wimux_name in @("codex", "gemini", "aider", "opencode", "copilot", "
 }
 Remove-Variable __wimux_name, __wimux_body -ErrorAction SilentlyContinue
 
+# ---------------------------------------------------------------------------
+# Docker: dlist picks a container and opens a shell in it (bash, else sh).
+#   dlist            -> pick from all containers (running first; stopped ones are started)
+#   dlist <words>    -> start with <words> as the filter
+#   dlist --enter X  -> open a shell in container X (wimux uses this to restore the pane)
+# wimux remembers which container the pane was in (also for a plain
+# `docker exec -it <container> ...` / `docker attach <container>`) and enters it
+# again on the next start.
+# ---------------------------------------------------------------------------
+function global:__wimux_docker_exe {
+    Get-Command docker -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty Source
+}
+
+function global:__wimux_docker_started([string]$name) {
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($name))
+    [Console]::Write("$([char]0x1b)]1337;SetUserVar=WIMUX_DOCKER=$b64$([char]0x07)")
+}
+
+function global:__wimux_docker_enter([string]$name) {
+    $docker = __wimux_docker_exe
+    if (-not $docker) { Write-Host "dlist: docker not found"; return }
+    $running = & $docker inspect -f "{{.State.Running}}" $name 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Host "dlist: no such container: $name"; return }
+    if ("$running".Trim() -ne "true") {
+        Write-Host "starting $name ..."
+        & $docker start $name | Out-Null
+        if ($LASTEXITCODE -ne 0) { return }
+    }
+    __wimux_docker_started $name
+    & $docker exec -it $name sh -c 'if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi'
+}
+
+function global:dlist {
+    if ($args.Count -ge 2 -and $args[0] -eq "--enter") {
+        __wimux_docker_enter $args[1]
+        return
+    }
+    $docker = __wimux_docker_exe
+    if (-not $docker) { Write-Host "dlist: docker not found"; return }
+    $rows = @(& $docker ps -a --format "{{.Names}}|{{.State}}|{{.Image}}|{{.Status}}" 2>$null)
+    if ($LASTEXITCODE -ne 0) { Write-Host "dlist: docker is not running (start Docker Desktop)"; return }
+    if ($rows.Count -eq 0) { Write-Host "dlist: no containers"; return }
+    $parsed = @($rows | Where-Object { $_ } | ForEach-Object {
+        $f = $_.Split('|')
+        [pscustomobject]@{ Name = $f[0]; State = $f[1]; Image = $f[2]; Status = $f[3] }
+    })
+    $width = ($parsed | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
+    $items = @(@($parsed | Where-Object { $_.State -eq "running" }) + @($parsed | Where-Object { $_.State -ne "running" }) |
+        ForEach-Object { "$($_.Name.PadRight($width))  $($_.Image)  ($($_.Status))" })
+    $picked = __wimux_select $items ($args -join " ") "dlist" "enter"
+    if (-not $picked) { return }
+    __wimux_docker_enter ($picked.Trim().Split(' ')[0])
+}
+
+# Plain `docker exec -it <container> ...` / `docker attach <container>`: tell wimux
+# the container, so the pane enters it again next time
+if (-not (Get-Command docker -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
+    function global:docker {
+        $exe = __wimux_docker_exe
+        if (-not $exe) { Write-Host "docker: command not found"; return }
+        $sub = if ($args.Count -gt 0) { "$($args[0])" } else { "" }
+        if ($sub -eq "exec" -or $sub -eq "attach") {
+            $interactive = $sub -eq "attach"
+            $container = $null
+            $takesValue = @("-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys")
+            for ($i = 1; $i -lt $args.Count; $i++) {
+                $a = "$($args[$i])"
+                if ($a.StartsWith("--")) {
+                    if ($a -eq "--interactive") { $interactive = $true }
+                    if ($takesValue -contains $a) { $i++ }
+                } elseif ($a.StartsWith("-") -and $a.Length -gt 1) {
+                    if ($a.Substring(1).Contains("i")) { $interactive = $true }
+                    if ($takesValue -contains $a) { $i++ }
+                } else {
+                    $container = $a
+                    break
+                }
+            }
+            if ($interactive -and $container) { __wimux_docker_started $container }
+        }
+        & $exe @args
+    }
+}
+
 # sondev notify [--title <title>] <message>: show a notification from this pane
 # (e.g. at the end of a long build:  cargo build; sondev notify "build done")
 if ($env:WIMUX_EXE) {

@@ -40,6 +40,7 @@ GPU で描画するネイティブアプリ（GPUI ＋ alacritty_terminal ＋ Co
 ### 閉じても、そのまま続きから
 - ワークスペース・分割・タブ、各ペインのフォルダ・conda 環境を自動で保存し、次の起動で元に戻します
 - Claude Code を使っていたペインは、**そのペインの会話を `claude --resume` で再開**します
+- Docker のコンテナに入っていたペイン（`dlist`・`docker exec -it`・`docker attach`）は、そのコンテナに入り直します（止まっていれば起動）
 - Codex は `codex resume <ID>`（ID が分からなければ `codex resume --last`）、OpenCode / Copilot は `--continue`、Gemini は `--resume latest` で再開します
 - ウィンドウの位置・大きさも覚えています
 
@@ -54,6 +55,7 @@ GPU で描画するネイティブアプリ（GPUI ＋ alacritty_terminal ＋ Co
 - 日本語入力（IME）、全角文字、24bit カラー
 - フォルダ履歴からの移動（`cdi`、fzf 対応）
 - conda の環境を一覧から選んで有効にする（`clist`。`conda info -e` → `conda activate` の代わり）
+- Docker のコンテナを一覧から選んで入る（`dlist`）。サイドバーに 🐳 コンテナ名
 - テーマ・フォント・文字サイズ・行の高さ・カーソル・背景の透過を設定画面から変更
 - コマンドパレット（Ctrl+Shift+P）で、すべての操作を名前で探して実行
 - キー割り当ては settings.json で変更できます
@@ -112,6 +114,7 @@ Claude にブラウザを操作させる機能を使うときだけ、Node.js（
 | `codex` / `gemini` / `aider` など | そのエージェントを起動（状態の表示と完了の通知が有効） |
 | `cdi [キーワード]` | よく行くフォルダの履歴から選んで移動 |
 | `clist [キーワード]` | conda の環境を一覧から選んで有効にする（今の環境には `*`） |
+| `dlist [キーワード]` | Docker のコンテナを一覧から選んで中のシェル（bash / sh）に入る。止まっているコンテナは起動する |
 | `web [URL / ポート / 検索語]` | 同じ区画にブラウザのタブを開く（`web 3000` → localhost:3000、`web github.com`、`web rust 非同期`） |
 | `sondev notify [--title 題] 本文` | 通知を出す（例: `cargo build; sondev notify ビルド完了`） |
 
