@@ -61,10 +61,23 @@ GPU で描画するネイティブアプリ（GPUI ＋ alacritty_terminal ＋ Co
 ## インストール
 
 ### winget で入れる（おすすめ）
+PowerShell（またはコマンドプロンプト）で:
+
 ```powershell
 winget install Sondev.SondevTerminal
 ```
-更新は `winget upgrade Sondev.SondevTerminal`（アプリ内の［更新］ボタンでも更新できます）。
+
+| やりたいこと | コマンド |
+|---|---|
+| 入れる | `winget install Sondev.SondevTerminal` |
+| 新しい版にする | `winget upgrade Sondev.SondevTerminal`（アプリ内の［更新］ボタンでも更新できます） |
+| 入っている版を見る | `winget list Sondev.SondevTerminal` |
+| 消す | `winget uninstall Sondev.SondevTerminal`（設定・ワークスペースは `%APPDATA%\SondevTerminal` に残ります） |
+
+- 管理者権限は要りません（ユーザーごとに `%LOCALAPPDATA%\Programs\Sondev Terminal` に入ります）
+- 「見つかりません」と出るときは、`winget source update` で一覧を新しくしてから、もう一度試してください
+- 新しい版は、リリースしてから winget に反映されるまで数時間〜数日かかることがあります。すぐに使いたいときは、下のインストーラーかアプリ内の［更新］を使ってください
+- `winget` 自体が無いときは、Microsoft Store の「アプリ インストーラー」を入れると使えるようになります（Windows 11 には最初から入っています）
 
 ### インストーラーで入れる
 1. [Releases](../../releases) から `SondevTerminal-setup-<バージョン>.exe` をダウンロードして実行します
