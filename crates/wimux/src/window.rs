@@ -3207,6 +3207,7 @@ impl WimuxWindow {
         let restore = self.settings.restore_claude;
         let toggle = div()
             .id("toggle-restore-claude")
+            .flex_none()
             .w(px(38.))
             .h(px(22.))
             .p(px(3.))
@@ -3273,7 +3274,10 @@ impl WimuxWindow {
             .child(div().size(px(16.)).rounded_full().bg(rgb(0xffffff)));
 
         let row = |label: &'static str, hint: &'static str| {
+            // 説明が長くても右のトグルを押し出さないよう、縮めて折り返す
             div()
+                .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .gap(px(2.))
