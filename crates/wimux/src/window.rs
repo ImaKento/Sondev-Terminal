@@ -289,6 +289,8 @@ struct Pane {
     restore_cmds: Vec<String>,
     cwd: Option<String>,
     conda: Option<String>,
+    /// 入っている Docker のコンテナ（dlist・`docker exec -it` から届く。プロンプトが出たら抜けた）
+    docker: Option<String>,
     title: Option<String>,
     state: AgentState,
     /// 動いているエージェントの表示名（"Claude" / "Codex" など）
@@ -342,6 +344,7 @@ impl Pane {
             restore_cmds: Vec::new(),
             cwd,
             conda: None,
+            docker: None,
             title: None,
             state: AgentState::None,
             agent: None,
@@ -1968,7 +1971,13 @@ impl WimuxWindow {
                 let Some(pane) = self.panes.get_mut(&id) else {
                     return;
                 };
-                // プロンプトが出た = Claude Code などのアプリは終了している
+                // プロンプトが出た = Claude Code などのアプリは終了している（コンテナからも抜けた）
+                if pane.docker.take().is_some() {
+                    self.schedule_save(cx);
+                }
+                let Some(pane) = self.panes.get_mut(&id) else {
+                    return;
+                };
                 pane.state = AgentState::None;
                 pane.agent = None;
                 pane.hooked = false;
@@ -1990,6 +1999,15 @@ impl WimuxWindow {
                             pane.conda = conda;
                             self.schedule_save(cx);
                         }
+                    }
+                }
+                // シェル連携の dlist・docker がコンテナに入る直前に送る
+                "WIMUX_DOCKER" => {
+                    if let Some(pane) = self.panes.get_mut(&id)
+                        && valid_container(value)
+                    {
+                        pane.docker = Some(value.clone());
+                        self.schedule_save(cx);
                     }
                 }
                 // シェル連携のラッパー（codex・gemini など）がエージェントを起動する直前に送る
@@ -2410,6 +2428,7 @@ impl WimuxWindow {
         PaneState {
             cwd: pane.and_then(|p| p.cwd.clone()),
             conda: pane.and_then(|p| p.conda.clone()),
+            docker: pane.and_then(|p| p.docker.clone()),
             claude: pane.is_some_and(|p| p.agent == Some(CLAUDE) && p.state != AgentState::None),
             // フックが記録した今のセッション。まだ無ければ前回から引き継いだもの
             claude_session: pane
@@ -2503,6 +2522,11 @@ impl WimuxWindow {
         if let Some(env) = p.conda.as_ref().filter(|e| !e.is_empty()) {
             pane.restore_cmds
                 .push(format!("conda activate '{}'", env.replace('\'', "''")));
+        }
+        // Docker のコンテナに入っていたら入り直す（止まっていれば起動する）
+        if let Some(name) = p.docker.as_ref().filter(|n| valid_container(n)) {
+            pane.restore_cmds.push(format!("dlist --enter {name}"));
+            pane.docker = Some(name.clone());
         }
         if p.claude && self.settings.restore_claude && restore_claude_enabled() {
             // セッション ID が分かればそのセッションを、分からなければフォルダの最新を開く
@@ -2659,6 +2683,7 @@ impl WimuxWindow {
             let cwd = focused.and_then(|p| p.cwd.as_deref()).map(short_path);
             let branch = focused.and_then(|p| p.branch.clone());
             let conda = focused.and_then(|p| p.conda.clone());
+            let docker = focused.and_then(|p| p.docker.clone());
             let (claude, agent) = self.workspace_agent(ws);
             let unread = ws.unread;
             let note = ws.last_notification.clone();
@@ -2685,6 +2710,12 @@ impl WimuxWindow {
                 line3.push((
                     format!("🐍 {env}"),
                     if selected { meta } else { th().green_dim },
+                ));
+            }
+            if let Some(name) = docker {
+                line3.push((
+                    format!("🐳 {name}"),
+                    if selected { meta } else { th().accent },
                 ));
             }
             match claude {
@@ -4521,6 +4552,14 @@ fn folder_name(path: &str) -> Option<String> {
     })
 }
 
+/// Docker のコンテナ名・ID として正しいか（復元のコマンドに埋め込むので厳しく見る）
+fn valid_container(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 128
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
 /// `WIMUX_RESTORE_CLAUDE=0` で Claude Code の自動再開を止められる
 fn restore_claude_enabled() -> bool {
     std::env::var("WIMUX_RESTORE_CLAUDE").map_or(true, |v| v != "0")
@@ -4528,7 +4567,18 @@ fn restore_claude_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentState, claude_state_from_title, folder_name, moved_index};
+    use super::{AgentState, claude_state_from_title, folder_name, moved_index, valid_container};
+
+    #[test]
+    fn container_names() {
+        assert!(valid_container("web"));
+        assert!(valid_container("my_app-db.1"));
+        assert!(valid_container("3f2a9c1e44ab"));
+        assert!(!valid_container(""));
+        assert!(!valid_container("-rm"));
+        assert!(!valid_container("a; rm -rf /"));
+        assert!(!valid_container("a b"));
+    }
 
     #[test]
     fn reorder_keeps_active() {

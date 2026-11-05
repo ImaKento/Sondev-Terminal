@@ -84,6 +84,9 @@ pub struct PaneState {
     /// そのエージェントのセッション ID（Codex の thread-id。`codex resume <ID>` で再開する）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<String>,
+    /// 終了時に入っていた Docker のコンテナ（`dlist --enter <名前>` で入り直す）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker: Option<String>,
     /// ブラウザのタブなら URL
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
