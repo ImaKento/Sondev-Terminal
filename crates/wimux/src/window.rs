@@ -325,6 +325,9 @@ struct Pane {
     url_field: Option<Entity<TextField>>,
     _field_sub: Option<Subscription>,
     loading: bool,
+    /// ファイルの表示のタブなら、そのファイル
+    file: Option<PathBuf>,
+    file_view: Option<Entity<crate::viewer::FileView>>,
 }
 
 impl Pane {
@@ -334,8 +337,24 @@ impl Pane {
         p
     }
 
+    /// ファイルの表示のタブ（フォルダはそのファイルのフォルダにする: 新しいタブ・サイドバーの表示用）
+    fn new_file(path: PathBuf) -> Self {
+        let mut p = Self::new(path.parent().map(|d| d.to_string_lossy().into_owned()));
+        p.file = Some(path);
+        p
+    }
+
     fn is_browser(&self) -> bool {
         self.url.is_some()
+    }
+
+    fn is_file(&self) -> bool {
+        self.file.is_some()
+    }
+
+    /// シェルが動くターミナルのタブか
+    fn is_terminal(&self) -> bool {
+        !self.is_browser() && !self.is_file()
     }
 
     fn new(cwd: Option<String>) -> Self {
@@ -366,6 +385,8 @@ impl Pane {
             url_field: None,
             _field_sub: None,
             loading: false,
+            file: None,
+            file_view: None,
         }
     }
 }
@@ -735,7 +756,7 @@ impl WimuxWindow {
         if let Some(view) = &pane.view {
             return Some(view.clone());
         }
-        if pane.is_browser() {
+        if !pane.is_terminal() {
             return None;
         }
         let cwd = pane
@@ -782,6 +803,16 @@ impl WimuxWindow {
                 self.focus_handle.focus(window, cx);
                 return;
             }
+        }
+        if let Some(view) = self.ensure_file_view(id, cx) {
+            let handle = view.read(cx).focus_handle(cx);
+            handle.focus(window, cx);
+            cx.on_next_frame(window, move |this, window, cx| {
+                if this.focused_pane() == Some(id) && !handle.is_focused(window) {
+                    handle.focus(window, cx);
+                }
+            });
+            return;
         }
         if let Some(view) = self.ensure_view(id, window, cx) {
             let handle = view.read(cx).focus_handle(cx);
@@ -1486,6 +1517,12 @@ impl WimuxWindow {
                     cx.notify();
                 });
             }
+            if let Some(view) = &pane.file_view {
+                view.update(cx, |v, cx| {
+                    v.set_font_size(size);
+                    cx.notify();
+                });
+            }
         }
         if self.settings.font_size != size {
             self.settings.font_size = size;
@@ -1867,10 +1904,17 @@ impl WimuxWindow {
     fn set_font_family(&mut self, family: Option<String>, cx: &mut Context<Self>) {
         self.settings.font_family = family.clone();
         settings::save(&self.settings);
+        let font = crate::terminal::view::pick_font(cx, family.as_deref());
         for pane in self.panes.values() {
             if let Some(view) = &pane.view {
                 view.update(cx, |v, cx| {
                     v.set_font_family(family.as_deref(), cx);
+                    cx.notify();
+                });
+            }
+            if let Some(view) = &pane.file_view {
+                view.update(cx, |v, cx| {
+                    v.set_font(font.clone());
                     cx.notify();
                 });
             }
@@ -1912,7 +1956,7 @@ impl WimuxWindow {
         let terminal_cwd = self
             .focused_pane()
             .and_then(|id| self.panes.get(&id))
-            .filter(|p| !p.is_browser())
+            .filter(|p| p.is_terminal())
             // シェル連携から届いたフォルダ。まだ届いていなければ起動したフォルダ
             .map(|p| {
                 p.cwd
@@ -2046,11 +2090,13 @@ impl WimuxWindow {
                                     el.cursor_pointer().hover(|s| s.bg(rgb(c.hover_bg)))
                                 })
                                 .when_some(entry, |el, entry| {
-                                    el.on_click(cx.listener(move |this, _, window, cx| {
-                                        this.on_file_click(&entry, cx);
-                                        // キー入力はターミナルに戻す
-                                        this.focus_active(window, cx);
-                                    }))
+                                    el.on_click(cx.listener(
+                                        move |this, ev: &ClickEvent, window, cx| {
+                                            this.on_file_click(&entry, ev.modifiers(), window, cx);
+                                            // キー入力はターミナルに戻す
+                                            this.focus_active(window, cx);
+                                        },
+                                    ))
                                 })
                                 .child(
                                     div()
@@ -2108,17 +2154,113 @@ impl WimuxWindow {
             .child(list)
     }
 
-    /// 一覧の行をクリック: フォルダは開く / 閉じる、ファイルはエディタで開く
-    fn on_file_click(&mut self, entry: &crate::file_tree::Entry, cx: &mut Context<Self>) {
+    /// 一覧の行をクリック: フォルダは開く / 閉じる、ファイルは Sondev の中で表示（Ctrl+クリックはエディタ）
+    fn on_file_click(
+        &mut self,
+        entry: &crate::file_tree::Entry,
+        modifiers: Modifiers,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if entry.is_dir {
             if self.file_tree.toggle(&entry.path) {
                 let missing = self.file_tree.take_missing();
                 self.load_dirs(missing, cx);
             }
             cx.notify();
-        } else {
+        } else if modifiers.control || modifiers.platform {
             crate::open::open_path(&entry.path, None, None, self.settings.editor.as_deref());
+        } else if let Some(gid) = self.focused_group() {
+            self.open_file_in(gid, entry.path.clone(), window, cx);
         }
+    }
+
+    /// 区画にファイルの表示のタブを開く（同じファイルのタブが区画にあればそれを選ぶ）
+    fn open_file_in(
+        &mut self,
+        gid: GroupId,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = self.groups.get(&gid).and_then(|g| {
+            g.tabs.iter().position(|id| {
+                self.panes
+                    .get(id)
+                    .is_some_and(|p| p.file.as_deref() == Some(path.as_path()))
+            })
+        });
+        let id = match existing {
+            Some(i) => {
+                if let Some(group) = self.groups.get_mut(&gid) {
+                    group.active = i;
+                }
+                let id = self.groups.get(&gid).and_then(|g| g.active_pane());
+                // 開き直したら読み直す（変わっているかもしれないので）
+                if let Some(v) = id
+                    .and_then(|id| self.panes.get(&id))
+                    .and_then(|p| p.file_view.clone())
+                {
+                    v.update(cx, |v, cx| v.reload(cx));
+                }
+                id
+            }
+            None => {
+                let id = self.alloc_id();
+                self.panes.insert(id, Pane::new_file(path));
+                if let Some(group) = self.groups.get_mut(&gid) {
+                    let at = (group.active + 1).min(group.tabs.len());
+                    group.tabs.insert(at, id);
+                    group.active = at;
+                }
+                Some(id)
+            }
+        };
+        if let Some(ws) = self.workspaces.get_mut(self.active) {
+            ws.focused = gid;
+        }
+        if let Some(id) = id {
+            self.focus_pane(id, window, cx);
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// ファイルの表示を（まだなら）作る
+    fn ensure_file_view(
+        &mut self,
+        id: PaneId,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<crate::viewer::FileView>> {
+        let pane = self.panes.get(&id)?;
+        let path = pane.file.clone()?;
+        if let Some(v) = &pane.file_view {
+            return Some(v.clone());
+        }
+        let font = crate::terminal::view::pick_font(cx, self.settings.font_family.as_deref());
+        let font_size = self.font_size;
+        let editor = self.settings.editor.clone();
+        let view = cx.new(|cx| crate::viewer::FileView::new(path, font, font_size, editor, cx));
+        let sub = cx.subscribe(
+            &view,
+            move |this, _, ev: &crate::viewer::FileViewEvent, cx| match ev {
+                crate::viewer::FileViewEvent::Focused => {
+                    if let Some((wi, gid, ti)) = this.locate(id)
+                        && wi == this.active
+                    {
+                        this.workspaces[wi].focused = gid;
+                        if let Some(group) = this.groups.get_mut(&gid) {
+                            group.active = ti;
+                        }
+                        cx.notify();
+                    }
+                }
+            },
+        );
+        let pane = self.panes.get_mut(&id)?;
+        pane.file_view = Some(view.clone());
+        pane._sub = Some(sub);
+        Some(view)
     }
 
     // -----------------------------------------------------------------------
@@ -2719,6 +2861,9 @@ impl WimuxWindow {
             cwd: pane.and_then(|p| p.cwd.clone()),
             conda: pane.and_then(|p| p.conda.clone()),
             docker: pane.and_then(|p| p.docker.clone()),
+            file: pane
+                .and_then(|p| p.file.as_ref())
+                .map(|f| f.to_string_lossy().into_owned()),
             claude: pane.is_some_and(|p| p.agent == Some(CLAUDE) && p.state != AgentState::None),
             // フックが記録した今のセッション。まだ無ければ前回から引き継いだもの
             claude_session: pane
@@ -2803,6 +2948,11 @@ impl WimuxWindow {
         if let Some(url) = p.url {
             let id = self.alloc_id();
             self.panes.insert(id, Pane::new_browser(url));
+            return id;
+        }
+        if let Some(file) = p.file {
+            let id = self.alloc_id();
+            self.panes.insert(id, Pane::new_file(PathBuf::from(file)));
             return id;
         }
         let id = self.alloc_pane(p.cwd.clone());
@@ -4139,6 +4289,12 @@ impl WimuxWindow {
                 Some(p) if p.is_browser() => {
                     browser::short_label(p.title.as_deref(), p.url.as_deref().unwrap_or(""))
                 }
+                Some(p) if p.is_file() => p
+                    .file
+                    .as_ref()
+                    .and_then(|f| f.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
                 _ => pane
                     .and_then(|p| p.cwd.as_deref().and_then(folder_name))
                     .unwrap_or_else(|| format!("タブ {}", i + 1)),
@@ -4486,6 +4642,7 @@ impl WimuxWindow {
                 let pane_id = self.groups.get(gid).and_then(|g| g.active_pane());
                 let pane = pane_id.and_then(|id| self.panes.get(&id));
                 let view = pane.and_then(|p| p.view.clone());
+                let file_view = pane.and_then(|p| p.file_view.clone());
                 // 見ていない間に何かあった区画は、状態の色の枠で囲む
                 let attention = pane
                     .filter(|p| p.attention)
@@ -4520,6 +4677,7 @@ impl WimuxWindow {
                                 None => transparent_black(),
                             })
                             .when_some(view, |el, v| el.child(v))
+                            .when_some(file_view, |el, v| el.child(v))
                             .when_some(browser_el, |el, b| el.child(b))
                             .when(self.tab_dragging(cx), |el| {
                                 el.child(self.render_drop_overlay(*gid, cx))
@@ -4634,6 +4792,7 @@ impl Render for WimuxWindow {
             .collect();
         for id in &visible {
             self.ensure_view(*id, window, cx);
+            self.ensure_file_view(*id, cx);
         }
         self.sync_browsers(&visible, window, cx);
         self.sync_file_tree(cx);
@@ -4747,6 +4906,11 @@ impl Render for WimuxWindow {
                 )
             })
     }
+}
+
+/// パスの短い表示（ホームフォルダを ~ に）
+pub(crate) fn display_path(path: &std::path::Path) -> String {
+    short_path(&path.to_string_lossy())
 }
 
 /// ホームフォルダを ~ に置き換えた短い表示

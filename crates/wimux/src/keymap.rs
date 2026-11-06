@@ -402,6 +402,9 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-a", NoAction, Some("TextField")),
         KeyBinding::new("ctrl-v", NoAction, Some("TextField")),
         KeyBinding::new("tab", NoAction, Some("TextField")),
+        // ファイルの表示では Ctrl+C（コピー）・Ctrl+A（すべて選択）を自分で処理する
+        KeyBinding::new("ctrl-c", NoAction, Some("FileView")),
+        KeyBinding::new("ctrl-a", NoAction, Some("FileView")),
         // 入力欄では Ctrl+←→ は単語単位のカーソル移動
         KeyBinding::new("ctrl-left", NoAction, Some("TextField")),
         KeyBinding::new("ctrl-right", NoAction, Some("TextField")),
