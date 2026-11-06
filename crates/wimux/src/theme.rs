@@ -22,6 +22,9 @@ pub const UI_SMALL: f32 = 11.5;
 
 // 寸法
 pub const SIDEBAR_WIDTH: f32 = 210.0;
+/// 右側のファイル一覧の幅と 1 行の高さ
+pub const FILE_TREE_WIDTH: f32 = 250.0;
+pub const FILE_TREE_ROW: f32 = 22.0;
 /// 区画ごとのタブの行（上端の区画ではタイトルバーを兼ねる）
 pub const TAB_BAR_HEIGHT: f32 = 36.0;
 pub const TAB_HEIGHT: f32 = 29.0;
