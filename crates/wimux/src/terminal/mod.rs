@@ -430,7 +430,7 @@ fn find_in_path(exe: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)

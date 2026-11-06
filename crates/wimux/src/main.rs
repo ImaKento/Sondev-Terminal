@@ -9,6 +9,7 @@ pub const APP_NAME: &str = "Sondev Terminal";
 mod browser;
 mod claude_session;
 mod dirs;
+mod file_tree;
 mod hooks;
 mod ipc;
 mod keymap;

@@ -56,6 +56,7 @@ gpui_kit::actions!(
         ZoomOut,
         ZoomReset,
         ToggleSidebar,
+        ToggleFileTree,
         OpenSettings,
         OpenBrowser,
         JumpToAttention,
@@ -399,6 +400,9 @@ pub struct WimuxWindow {
     web_context: Option<Rc<std::cell::RefCell<wry::WebContext>>>,
     browser_tx: BrowserSender,
     sidebar_visible: bool,
+    /// 右側のファイル一覧（フォーカス中のペインのフォルダ）
+    file_tree: crate::file_tree::FileTree,
+    file_tree_scroll: UniformListScrollHandle,
     /// 右クリックメニュー（対象のワークスペース番号, 表示位置）
     ws_menu: Option<(usize, Point<Pixels>)>,
     /// 分割の境界をマウスでドラッグ中（タブのドラッグと区別するため）
@@ -466,6 +470,8 @@ impl WimuxWindow {
             drop_hint: None,
             font_size: settings.font_size,
             sidebar_visible: true,
+            file_tree: Default::default(),
+            file_tree_scroll: UniformListScrollHandle::new(),
             ws_menu: None,
             resizing: false,
             focus_handle: cx.focus_handle(),
@@ -655,6 +661,19 @@ impl WimuxWindow {
                     if alive.is_err() {
                         break;
                     }
+                }
+            }
+        })
+        .detach();
+        // 右側のファイル一覧: 表示中は 3 秒ごとに読み直す
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                if this
+                    .update(cx, |this, cx| this.refresh_file_tree(cx))
+                    .is_err()
+                {
+                    break;
                 }
             }
         })
@@ -1871,6 +1890,195 @@ impl WimuxWindow {
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         cx.notify();
+    }
+
+    /// Ctrl+Shift+X: 右側のファイル一覧の表示 / 非表示（設定に保存）
+    fn toggle_file_tree(&mut self, _: &ToggleFileTree, _: &mut Window, cx: &mut Context<Self>) {
+        self.settings.file_tree = !self.settings.file_tree;
+        settings::save(&self.settings);
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------------
+    // 右側のファイル一覧
+    // -----------------------------------------------------------------------
+
+    /// 一覧のルートをフォーカス中のペインのフォルダに合わせ、まだ読んでいないフォルダを読む。
+    /// ブラウザのタブを見ているときは、前のフォルダのまま
+    fn sync_file_tree(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.file_tree {
+            return;
+        }
+        let terminal_cwd = self
+            .focused_pane()
+            .and_then(|id| self.panes.get(&id))
+            .filter(|p| !p.is_browser())
+            // シェル連携から届いたフォルダ。まだ届いていなければ起動したフォルダ
+            .map(|p| {
+                p.cwd
+                    .clone()
+                    .or_else(|| p.spawn_cwd.clone())
+                    .map(PathBuf::from)
+                    .or_else(crate::terminal::home_dir)
+            });
+        if let Some(cwd) = terminal_cwd {
+            self.file_tree.set_root(cwd);
+        }
+        let missing = self.file_tree.take_missing();
+        if !missing.is_empty() {
+            self.load_dirs(missing, cx);
+        }
+    }
+
+    /// フォルダを UI スレッドの外で読み、一覧に入れる
+    fn load_dirs(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move { crate::file_tree::read_dirs(dirs) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.file_tree.apply(results) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 表示中は 3 秒ごとに読み直す（ファイルの追加・削除を映す）
+    fn refresh_file_tree(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.file_tree {
+            return;
+        }
+        let dirs = self.file_tree.dirs_to_load();
+        if dirs.is_empty() {
+            return;
+        }
+        self.file_tree.mark_loading(&dirs);
+        self.load_dirs(dirs, cx);
+    }
+
+    fn render_file_tree(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::file_tree::Row;
+        let rows = Rc::new(self.file_tree.rows());
+        let count = rows.len();
+        let list = uniform_list(
+            "file-tree-list",
+            count,
+            cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+                let c = th();
+                range
+                    .filter_map(|ix| {
+                        let row = rows.get(ix)?;
+                        let (depth, label, color, chevron, entry) = match row {
+                            Row::Entry { depth, entry, open } => (
+                                *depth,
+                                entry.name.clone(),
+                                if entry.is_dir { c.text } else { c.text_dim },
+                                if entry.is_dir {
+                                    if *open { "▾" } else { "▸" }
+                                } else {
+                                    ""
+                                },
+                                Some(entry.clone()),
+                            ),
+                            Row::More { depth, count } => {
+                                (*depth, format!("… ほか {count} 件"), c.text_faint, "", None)
+                            }
+                            Row::Note { depth, text } => {
+                                (*depth, (*text).to_string(), c.text_faint, "", None)
+                            }
+                        };
+                        Some(
+                            div()
+                                .id(("file-tree-row", ix))
+                                .h(px(FILE_TREE_ROW))
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .pl(px(8. + depth as f32 * 12.))
+                                .pr(px(8.))
+                                .gap(px(4.))
+                                .text_size(px(UI_SMALL))
+                                .text_color(rgb(color))
+                                .when(entry.is_some(), |el| {
+                                    el.cursor_pointer().hover(|s| s.bg(rgb(c.hover_bg)))
+                                })
+                                .when_some(entry, |el, entry| {
+                                    el.on_click(cx.listener(move |this, _, window, cx| {
+                                        this.on_file_click(&entry, cx);
+                                        // キー入力はターミナルに戻す
+                                        this.focus_active(window, cx);
+                                    }))
+                                })
+                                .child(
+                                    div()
+                                        .w(px(10.))
+                                        .flex_none()
+                                        .text_color(rgb(c.text_faint))
+                                        .child(chevron),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(label),
+                                )
+                                .into_any_element(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(&self.file_tree_scroll)
+        .flex_1()
+        .min_h_0()
+        .py(px(4.));
+
+        div()
+            .id("file-tree")
+            .flex()
+            .flex_col()
+            .w(px(FILE_TREE_WIDTH))
+            .h_full()
+            .flex_none()
+            .border_l_1()
+            .border_color(rgb(th().panel_border))
+            .bg(theme::bg(th().chrome_bg))
+            // 独自タイトルバーのときは、上に最小化・最大化・閉じるボタンとウィンドウを動かす所だけ置く
+            .when(custom_titlebar(), |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .h(px(TAB_BAR_HEIGHT))
+                        .child(
+                            div()
+                                .flex_1()
+                                .h_full()
+                                .window_control_area(WindowControlArea::Drag),
+                        )
+                        .child(Self::caption_buttons(window)),
+                )
+            })
+            .child(list)
+    }
+
+    /// 一覧の行をクリック: フォルダは開く / 閉じる、ファイルはエディタで開く
+    fn on_file_click(&mut self, entry: &crate::file_tree::Entry, cx: &mut Context<Self>) {
+        if entry.is_dir {
+            if self.file_tree.toggle(&entry.path) {
+                let missing = self.file_tree.take_missing();
+                self.load_dirs(missing, cx);
+            }
+            cx.notify();
+        } else {
+            crate::open::open_path(&entry.path, None, None, self.settings.editor.as_deref());
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3998,6 +4206,8 @@ impl WimuxWindow {
         };
 
         let dragging = self.tab_dragging(cx);
+        // 右側のファイル一覧を出しているときは、最小化・最大化・閉じるはそちらの上に出す
+        let caption_here = custom_titlebar() && !self.settings.file_tree;
         div()
             .id(("group-tabs", gid))
             // タブの行の空いているところに落とすと最後に加える
@@ -4019,7 +4229,7 @@ impl WimuxWindow {
             .gap(px(2.))
             .h(px(TAB_BAR_HEIGHT))
             .pl(px(4.))
-            .when(!(edge.top_right && custom_titlebar()), |el| el.pr(px(4.)))
+            .when(!(edge.top_right && caption_here), |el| el.pr(px(4.)))
             .bg(theme::bg(th().chrome_bg))
             .child(
                 div()
@@ -4060,7 +4270,7 @@ impl WimuxWindow {
                         this.split(Axis::Vertical, window, cx);
                     })),
             )
-            .when(edge.top_right && custom_titlebar(), |el| {
+            .when(edge.top_right && caption_here, |el| {
                 el.child(Self::caption_buttons(window))
             })
     }
@@ -4386,6 +4596,7 @@ impl Render for WimuxWindow {
             self.ensure_view(*id, window, cx);
         }
         self.sync_browsers(&visible, window, cx);
+        self.sync_file_tree(cx);
         window.set_window_title(&format!(
             "{} — {}",
             crate::APP_NAME,
@@ -4437,6 +4648,7 @@ impl Render for WimuxWindow {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::toggle_file_tree))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_browser))
             .on_action(cx.listener(Self::jump_to_attention))
@@ -4460,6 +4672,9 @@ impl Render for WimuxWindow {
                     .h_full()
                     .child(div().flex_1().min_h_0().child(panes)),
             )
+            .when(self.settings.file_tree, |el| {
+                el.child(self.render_file_tree(window, cx))
+            })
             .when(self.settings_open, |el| el.child(self.render_settings(cx)))
             .when_some(self.ws_menu, |el, (index, pos)| {
                 el.child(self.render_ws_menu(index, pos, cx))

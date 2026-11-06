@@ -257,6 +257,12 @@ pub const COMMANDS: &[Command] = &[
         &["ctrl-0"],
     ),
     cmd(
+        "toggle_file_tree",
+        "wimux::ToggleFileTree",
+        "ファイル一覧（右側）の表示 / 非表示",
+        &["ctrl-shift-x"],
+    ),
+    cmd(
         "toggle_sidebar",
         "wimux::ToggleSidebar",
         "サイドバーの表示 / 非表示",

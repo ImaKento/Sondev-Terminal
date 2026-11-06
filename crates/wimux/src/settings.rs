@@ -37,6 +37,8 @@ pub struct Settings {
     pub editor: Option<String>,
     /// 起動時に新しいバージョンがあるか確かめる（GitHub Releases）
     pub check_updates: bool,
+    /// 右側のファイル一覧を表示する
+    pub file_tree: bool,
     /// キー割り当ての変更（キー → コマンド名。空文字列なら既定の割り当てを外す）。keymap.rs を参照
     pub keybindings: std::collections::BTreeMap<String, String>,
 }
@@ -81,6 +83,7 @@ impl Default for Settings {
             browser_cdp: false,
             editor: None,
             check_updates: true,
+            file_tree: false,
             keybindings: Default::default(),
         }
     }
