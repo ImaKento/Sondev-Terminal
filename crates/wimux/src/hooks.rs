@@ -91,7 +91,7 @@ type Windows = (Option<ipc::LimitWindow>, Option<ipc::LimitWindow>);
 
 /// Codex の利用上限。`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<時刻>-<thread-id>.jsonl` の
 /// 最後の `token_count` の `rate_limits`（primary / secondary）を読む
-fn codex_usage(thread: Option<&str>) -> Option<Windows> {
+pub fn codex_usage(thread: Option<&str>) -> Option<Windows> {
     let home = std::env::var_os("CODEX_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -99,13 +99,29 @@ fn codex_usage(thread: Option<&str>) -> Option<Windows> {
                 .or_else(|| std::env::var_os("HOME"))
                 .map(|h| std::path::PathBuf::from(h).join(".codex"))
         })?;
-    let file = find_rollout(&home.join("sessions"), thread)?;
-    let text = read_tail(&file, 512 * 1024)?;
-    text.lines().rev().find_map(codex_rate_limits)
+    // 会話が分からなければ新しいものから順に（始めたばかりの会話にはまだ上限の記録がない）
+    find_rollouts(&home.join("sessions"), thread, 5)
+        .into_iter()
+        .find_map(|file| {
+            let text = read_tail(&file, 512 * 1024)?;
+            text.lines().rev().find_map(codex_rate_limits)
+        })
 }
 
-/// その会話の記録のファイル（分からなければいちばん新しいもの）。新しい日付のフォルダから探す
+/// その会話の記録のファイル（分からなければいちばん新しいもの）
+#[cfg(test)]
 fn find_rollout(sessions: &std::path::Path, thread: Option<&str>) -> Option<std::path::PathBuf> {
+    find_rollouts(sessions, thread, 1).into_iter().next()
+}
+
+/// 会話の記録のファイルを新しい順に最大 `limit` 個（`thread` があればその会話のものだけ）。
+/// 新しい日付のフォルダから探す
+fn find_rollouts(
+    sessions: &std::path::Path,
+    thread: Option<&str>,
+    limit: usize,
+) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
     let sorted_desc = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
         let mut v: Vec<_> = std::fs::read_dir(dir)
             .map(|r| r.flatten().map(|e| e.path()).collect())
@@ -125,22 +141,26 @@ fn find_rollout(sessions: &std::path::Path, thread: Option<&str>) -> Option<std:
                             .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
                     })
                     .collect();
-                let hit = match thread {
-                    Some(t) => files.into_iter().find(|p| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| n.ends_with(&format!("{t}.jsonl")))
-                    }),
-                    // ファイル名は時刻順なので、名前の大きいものが新しい
-                    None => files.into_iter().next(),
-                };
-                if hit.is_some() {
-                    return hit;
+                // ファイル名は時刻順なので、名前の大きいものが新しい
+                for p in files {
+                    let hit = match thread {
+                        Some(t) => p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                            // rollout-<時刻>-<thread-id>.jsonl（巻き戻した会話は <thread-id>_<別 ID>）
+                            n.ends_with(&format!("-{t}.jsonl")) || n.contains(&format!("-{t}_"))
+                        }),
+                        None => true,
+                    };
+                    if hit {
+                        out.push(p);
+                        if out.len() >= limit {
+                            return out;
+                        }
+                    }
                 }
             }
         }
     }
-    None
+    out
 }
 
 /// ファイルの末尾（最大 `max` バイト）
