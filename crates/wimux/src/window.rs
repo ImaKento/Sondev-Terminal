@@ -626,6 +626,39 @@ impl WimuxWindow {
             })
             .detach();
         }
+        // Codex の利用上限: Codex が開いている間、Codex の記録（rollout）を 20 秒ごとに読む。
+        // notify（`--codex-notify`）が届かない環境（config.toml の notify・古い Codex など）でも出るように
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(20))
+                    .await;
+                let Ok(running) = this.update(cx, |this, _| {
+                    this.panes
+                        .values()
+                        .any(|p| p.agent == Some("Codex") && p.state != AgentState::None)
+                }) else {
+                    break;
+                };
+                if !running {
+                    continue;
+                }
+                let found = cx
+                    .background_executor()
+                    .spawn(async { crate::hooks::codex_usage(None) })
+                    .await;
+                if let Some((five_hour, seven_day)) = found {
+                    let alive = this.update(cx, |this, cx| {
+                        this.set_usage("Codex", five_hour, seven_day);
+                        cx.notify();
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
         // フックのないエージェントの状態を、出力の動きから推定する
         cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -2110,6 +2143,29 @@ impl WimuxWindow {
     // エージェントの状態（フック・出力の動き）と入力待ちへの移動
     // -----------------------------------------------------------------------
 
+    /// 利用上限を新しくする。届いた枠だけ新しくする（無い枠は戻る時刻を過ぎたら表示から消える）
+    fn set_usage(
+        &mut self,
+        label: &'static str,
+        five_hour: Option<crate::ipc::LimitWindow>,
+        seven_day: Option<crate::ipc::LimitWindow>,
+    ) {
+        let i = match self.usage.iter().position(|(l, _)| *l == label) {
+            Some(i) => i,
+            None => {
+                self.usage.push((label, AgentUsage::default()));
+                self.usage.len() - 1
+            }
+        };
+        let usage = &mut self.usage[i].1;
+        if five_hour.is_some() {
+            usage.five_hour = five_hour;
+        }
+        if seven_day.is_some() {
+            usage.seven_day = seven_day;
+        }
+    }
+
     /// ペインの中のフック・`sondev notify` から届いた知らせ
     fn on_ipc(&mut self, msg: crate::ipc::Incoming, window: &mut Window, cx: &mut Context<Self>) {
         use crate::ipc::{AgentEvent, Message};
@@ -2130,21 +2186,7 @@ impl WimuxWindow {
                 seven_day,
             } => {
                 let label = agent.as_deref().and_then(agent_label).unwrap_or(CLAUDE);
-                let i = match self.usage.iter().position(|(l, _)| *l == label) {
-                    Some(i) => i,
-                    None => {
-                        self.usage.push((label, AgentUsage::default()));
-                        self.usage.len() - 1
-                    }
-                };
-                let usage = &mut self.usage[i].1;
-                // 届いた枠だけ新しくする（無い枠は戻る時刻を過ぎたら表示から消える）
-                if five_hour.is_some() {
-                    usage.five_hour = five_hour;
-                }
-                if seven_day.is_some() {
-                    usage.seven_day = seven_day;
-                }
+                self.set_usage(label, five_hour, seven_day);
             }
             Message::Notify { title, body } => {
                 let title = title.unwrap_or_else(|| "通知".into());

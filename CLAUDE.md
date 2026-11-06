@@ -190,7 +190,7 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
 - ファイルを開くエディタは settings.json の `editor`（例: `"code -g {file}:{line}:{col}"`）。未設定なら VS Code → Cursor → Windsurf → 既定のアプリ
 - Claude Code の再開: シェル連携の `claude` 関数が `--settings claude-hook-settings.json` を付けて起動し、SessionStart フック（`sondev.exe --claude-hook`）がペインごとのセッション ID を `claude-sessions\<WIMUX_PANE_ID>` に書く。保存時に読んで session.json に記録し、次回は `claude --resume <ID>`（ID が無ければ `--continue`）
 - Codex などの再開: Codex の notify（`--codex-notify`）の `thread-id` を IPC でペインに送り、session.json の `agent` / `agent_session` に保存。次回は `codex resume <ID>`（無ければ `codex resume --last`。cwd で絞られる）。OpenCode / Copilot は `--continue`、Gemini は `--resume latest`（`window.rs` の `agent_resume_command`。方法が分からないエージェントは再開しない）
-- Codex の利用上限: notify のたびに `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread-id>.jsonl` の末尾から最後の `token_count` の `rate_limits`（primary / secondary の `used_percent`・`window_minutes`・`resets_at`）を読み、`Message::Usage { agent: "codex" }` で送る（`hooks.rs` の `codex_usage`）。枠の長さが 1 日以下なら 5 時間枠、それより長ければ週
+- Codex の利用上限: notify のたびに `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread-id>.jsonl` の末尾から最後の `token_count` の `rate_limits`（primary / secondary の `used_percent`・`window_minutes`・`resets_at`）を読み、`Message::Usage { agent: "codex" }` で送る（`hooks.rs` の `codex_usage`）。notify が届かない環境もあるので、本体も Codex のペインがある間 20 秒ごとに新しい記録（最大 5 ファイル）から読む（`window.rs` の `set_usage`）。枠の長さが 1 日以下なら 5 時間枠、それより長ければ週
 - conda の再開: base も含めて `conda activate` する（conda は遅延初期化なので base も自動では有効にならない）
 - URL 欄（text_field.rs）: カーソル移動・選択・コピー/切り取り/貼り付け・マウス選択に対応。GPUI の examples/input.rs と同じく自前で描画
 - ウィンドウ: 閉じたときの位置・大きさ・最大化を `window.json` に保存し、次の起動で復元（初回や、前回の位置がどの画面にも入らないときは最大化）
