@@ -1921,8 +1921,11 @@ impl WimuxWindow {
                     .map(PathBuf::from)
                     .or_else(crate::terminal::home_dir)
             });
-        if let Some(cwd) = terminal_cwd {
-            self.file_tree.set_root(cwd);
+        if let Some(cwd) = terminal_cwd
+            && self.file_tree.set_root(cwd)
+        {
+            // フォルダが変わったら git の状態もすぐ聞き直す
+            self.load_git_status(cx);
         }
         let missing = self.file_tree.take_missing();
         if !missing.is_empty() {
@@ -1957,10 +1960,34 @@ impl WimuxWindow {
         }
         self.file_tree.mark_loading(&dirs);
         self.load_dirs(dirs, cx);
+        self.load_git_status(cx);
+    }
+
+    /// git status を UI スレッドの外で実行し、一覧の色に使う
+    fn load_git_status(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.file_tree.root().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        if !self.file_tree.start_git() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let status = cx
+                .background_executor()
+                .spawn(async move { crate::file_tree::git_status(&r) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.file_tree.apply_git(&root, status) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn render_file_tree(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::file_tree::Row;
+        use crate::file_tree::{GitMark, Row};
         let rows = Rc::new(self.file_tree.rows());
         let count = rows.len();
         let list = uniform_list(
@@ -1972,10 +1999,23 @@ impl WimuxWindow {
                     .filter_map(|ix| {
                         let row = rows.get(ix)?;
                         let (depth, label, color, chevron, entry) = match row {
-                            Row::Entry { depth, entry, open } => (
+                            Row::Entry {
+                                depth,
+                                entry,
+                                open,
+                                git,
+                            } => (
                                 *depth,
                                 entry.name.clone(),
-                                if entry.is_dir { c.text } else { c.text_dim },
+                                // git の状態の色（VS Code と同じ考え方: 変更=黄、新規=緑、衝突=赤、無視=薄く）
+                                match git {
+                                    Some(GitMark::Conflict) => c.red,
+                                    Some(GitMark::Modified) => c.amber,
+                                    Some(GitMark::Added | GitMark::Untracked) => c.green,
+                                    Some(GitMark::Ignored) => c.text_faint,
+                                    None if entry.is_dir => c.text,
+                                    None => c.text_dim,
+                                },
                                 if entry.is_dir {
                                     if *open { "▾" } else { "▸" }
                                 } else {
