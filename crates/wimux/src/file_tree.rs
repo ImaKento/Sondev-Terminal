@@ -4,6 +4,7 @@
 //! - フォルダはクリックで開く / 閉じる。開いたフォルダはルートごとに覚えておく（ワークスペースを
 //!   切り替えて戻ってきても同じ開き方）
 //! - フォルダの読み込みは UI スレッドの外で行う（`read_dirs`）。表示中は数秒ごとに読み直す
+//! - git のリポジトリの中なら、変更のあるファイル（と、それを含むフォルダ）に色を付ける（`git_status`）
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,133 @@ pub struct Listing {
     pub error: bool,
 }
 
+/// git の状態（大きいほど優先して色を付ける）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GitMark {
+    /// .gitignore で無視されている
+    Ignored,
+    /// 新しいファイル（まだ git add していない）
+    Untracked,
+    /// 追加した（git add 済みの新しいファイル）
+    Added,
+    /// 変更・名前の変更・削除（フォルダは中に変更がある）
+    Modified,
+    /// マージの衝突
+    Conflict,
+}
+
+/// リポジトリ全体の git の状態
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitStatus {
+    /// ファイル・フォルダごとの状態（変更のあるファイルを含むフォルダにも付ける）
+    marks: HashMap<PathBuf, GitMark>,
+    /// 中身ごと新しい・無視されているフォルダ（`foo/` と出るもの）。下のものすべてに効く
+    dirs: Vec<(PathBuf, GitMark)>,
+}
+
+impl GitStatus {
+    pub fn mark(&self, path: &Path) -> Option<GitMark> {
+        if let Some(m) = self.marks.get(path) {
+            return Some(*m);
+        }
+        self.dirs
+            .iter()
+            .filter(|(d, _)| path.starts_with(d))
+            .map(|(_, m)| *m)
+            .max()
+    }
+}
+
+/// `git status --porcelain=v1 -z` の出力を読む（パスはリポジトリのいちばん上からの相対パス）
+pub fn parse_git_status(top: &Path, out: &[u8]) -> GitStatus {
+    let mut st = GitStatus::default();
+    let mut items = out.split(|b| *b == 0);
+    while let Some(item) = items.next() {
+        if item.len() < 4 {
+            continue;
+        }
+        let (x, y) = (item[0], item[1]);
+        let rel = String::from_utf8_lossy(&item[3..]).into_owned();
+        // 名前の変更・コピーは、次に元の名前が来る
+        if x == b'R' || x == b'C' {
+            items.next();
+        }
+        let mark = match (x, y) {
+            (b'?', b'?') => GitMark::Untracked,
+            (b'!', b'!') => GitMark::Ignored,
+            (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D') => GitMark::Conflict,
+            (b'A', _) => GitMark::Added,
+            _ => GitMark::Modified,
+        };
+        let is_dir = rel.ends_with('/');
+        // git は / で区切る。Windows でもエントリのパスと同じ形になるよう 1 つずつつなぐ
+        let mut path = top.to_path_buf();
+        for part in rel.split('/').filter(|p| !p.is_empty()) {
+            path.push(part);
+        }
+        if is_dir {
+            st.dirs.push((path.clone(), mark));
+        } else {
+            st.marks.insert(path.clone(), mark);
+        }
+        // 無視されているものは親フォルダに色を付けない
+        if mark == GitMark::Ignored {
+            continue;
+        }
+        let mut parent = path.parent();
+        while let Some(p) = parent {
+            if !p.starts_with(top) {
+                break;
+            }
+            let e = st.marks.entry(p.to_path_buf()).or_insert(mark);
+            if *e < mark {
+                *e = mark;
+            }
+            if p == top {
+                break;
+            }
+            parent = p.parent();
+        }
+    }
+    st
+}
+
+/// `dir` を含むリポジトリのいちばん上のフォルダ（.git があるところ）
+pub fn git_top(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// リポジトリの状態を git に聞く（バックグラウンドで呼ぶ。git が無い・リポジトリでなければ None）
+pub fn git_status(root: &Path) -> Option<GitStatus> {
+    let top = git_top(root)?;
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(&top)
+        .args([
+            // ユーザーの git の操作とぶつからないよう、index のロックを取らない
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--ignored=matching",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_git_status(&top, &out.stdout))
+}
+
 /// 表示する 1 行
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
@@ -36,6 +164,7 @@ pub enum Row {
         entry: Entry,
         /// フォルダが開いているか
         open: bool,
+        git: Option<GitMark>,
     },
     /// 「… ほか N 件」
     More { depth: usize, count: usize },
@@ -51,6 +180,10 @@ pub struct FileTree {
     listings: HashMap<PathBuf, Listing>,
     /// 読み込み中のフォルダ（同じフォルダを二重に読まない）
     loading: HashSet<PathBuf>,
+    /// git の状態（リポジトリの外なら None）
+    git: Option<GitStatus>,
+    /// git status を実行中（二重に実行しない）
+    git_loading: bool,
 }
 
 impl FileTree {
@@ -62,6 +195,30 @@ impl FileTree {
         self.root = root;
         // 前のルートの中身は捨てる（開き方は expanded に残っている）
         self.listings.clear();
+        self.git = None;
+        true
+    }
+
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// git status を始めてよければ true（実行中にする）
+    pub fn start_git(&mut self) -> bool {
+        if self.git_loading || self.root.is_none() {
+            return false;
+        }
+        self.git_loading = true;
+        true
+    }
+
+    /// git status の結果を入れる（`root` はそのとき聞いたルート）。変わったら true
+    pub fn apply_git(&mut self, root: &Path, status: Option<GitStatus>) -> bool {
+        self.git_loading = false;
+        if self.root.as_deref() != Some(root) || self.git == status {
+            return false;
+        }
+        self.git = status;
         true
     }
 
@@ -170,6 +327,7 @@ impl FileTree {
                 depth,
                 entry: entry.clone(),
                 open,
+                git: self.git.as_ref().and_then(|g| g.mark(&entry.path)),
             });
             if open {
                 self.push_rows(&entry.path, depth + 1, out);
@@ -235,7 +393,28 @@ pub fn read_dirs(dirs: Vec<PathBuf>) -> Vec<(PathBuf, Listing)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileTree, Row, read_dir, read_dirs};
+    use super::{FileTree, GitMark, Row, parse_git_status, read_dir, read_dirs};
+
+    #[test]
+    fn git_status() {
+        let top = std::path::Path::new("/repo");
+        let out = b" M src/main.rs\0?? new.txt\0A  src/added.rs\0R  src/b.rs\0src/a.rs\0UU c.rs\0!! target/\0?? docs/\0";
+        let st = parse_git_status(top, out);
+        let m = |p: &str| st.mark(&top.join(p));
+        assert_eq!(m("src/main.rs"), Some(GitMark::Modified));
+        assert_eq!(m("new.txt"), Some(GitMark::Untracked));
+        assert_eq!(m("src/added.rs"), Some(GitMark::Added));
+        // 名前の変更は新しい名前に付け、元の名前は読み飛ばす
+        assert_eq!(m("src/b.rs"), Some(GitMark::Modified));
+        assert_eq!(m("src/a.rs"), None);
+        assert_eq!(m("c.rs"), Some(GitMark::Conflict));
+        // フォルダは中のいちばん強い状態
+        assert_eq!(m("src"), Some(GitMark::Modified));
+        // 無視・新しいフォルダは下のものすべてに効く。無視は親に広げない
+        assert_eq!(m("target/debug/x"), Some(GitMark::Ignored));
+        assert_eq!(m("docs/a/b.md"), Some(GitMark::Untracked));
+        assert_eq!(m("README.md"), None);
+    }
 
     #[test]
     fn tree() {
