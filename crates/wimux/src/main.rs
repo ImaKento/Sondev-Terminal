@@ -22,6 +22,7 @@ mod terminal;
 mod text_field;
 mod theme;
 mod update;
+mod viewer;
 mod window;
 mod window_state;
 mod workspace;

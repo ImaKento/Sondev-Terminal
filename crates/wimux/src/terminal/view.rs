@@ -1046,7 +1046,7 @@ pub fn installed_fonts(cx: &App) -> Vec<&'static str> {
 }
 
 /// `preferred` がインストールされていればそれ、なければ候補の先頭から自動で選ぶ
-fn pick_font(cx: &App, preferred: Option<&str>) -> Font {
+pub(crate) fn pick_font(cx: &App, preferred: Option<&str>) -> Font {
     let installed = cx.text_system().all_font_names();
     let is_installed = |name: &str| installed.iter().any(|f| f == name);
     let family: String = preferred

@@ -87,6 +87,9 @@ pub struct PaneState {
     /// 終了時に入っていた Docker のコンテナ（`dlist --enter <名前>` で入り直す）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker: Option<String>,
+    /// ファイルの表示のタブならそのファイル
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     /// ブラウザのタブなら URL
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
