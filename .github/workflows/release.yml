@@ -119,8 +119,26 @@ jobs:
           name: winget-manifests-${{ steps.ver.outputs.version }}
           path: dist/winget/
 
-      - name: winget に申請する
+      # まだ winget に登録されていない（最初の申請の審査中）あいだは申請しない。
+      # 新しいパッケージの申請は版ごとに別の PR になってしまい、審査が混乱するため。
+      # 登録されたら（microsoft/winget-pkgs にマニフェストのフォルダができたら）自動で申請を再開する
+      - name: winget に登録済みか確かめる
+        id: winget
         if: ${{ env.WINGET_TOKEN != '' && !contains(steps.ver.outputs.version, '-') && inputs.prerelease != true }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/microsoft/winget-pkgs/contents/manifests/s/Sondev/SondevTerminal --silent 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            "registered=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "registered=false" >> $env:GITHUB_OUTPUT
+            Write-Host "::notice::Sondev.SondevTerminal はまだ winget に登録されていないので、申請しません（最初の申請の審査が終わったら、次のリリースから自動で申請します）。マニフェストは成果物 winget-manifests-* に残しています"
+          }
+
+      - name: winget に申請する
+        if: ${{ steps.winget.outputs.registered == 'true' }}
         shell: pwsh
         run: |
           Invoke-WebRequest -UseBasicParsing https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
