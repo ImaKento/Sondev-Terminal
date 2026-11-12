@@ -136,6 +136,9 @@ jobs:
             "registered=false" >> $env:GITHUB_OUTPUT
             Write-Host "::notice::Sondev.SondevTerminal はまだ winget に登録されていないので、申請しません（最初の申請の審査が終わったら、次のリリースから自動で申請します）。マニフェストは成果物 winget-manifests-* に残しています"
           }
+          # gh api が見つからずに 1 で終わっても、この手順は失敗にしない
+          # （pwsh の手順は最後の $LASTEXITCODE で終わるため）
+          exit 0
 
       - name: winget に申請する
         if: ${{ steps.winget.outputs.registered == 'true' }}
