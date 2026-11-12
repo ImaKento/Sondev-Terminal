@@ -116,7 +116,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | Ctrl+Shift+A / `clist [キーワード]` | conda の環境をターミナル内で選んで `conda activate`（cdi と同じ選択画面。一覧は conda を起動せず `<root>\envs\*` と `~\.conda\environments.txt` から作る） |
 | `dlist [キーワード]` | Docker のコンテナを選んで `docker exec -it <名前>`（bash、無ければ sh）。止まっていれば `docker start`。入るときに `WIMUX_DOCKER` を送り、ペインごとに session.json の `docker` に保存して次回 `dlist --enter <名前>` で入り直す（`docker exec -it` / `docker attach` を直接打っても同じ。名前は `valid_container` で検査）。プロンプトが出たら抜けたとみなす |
 | Ctrl+C | 文字を選択中ならコピー、そうでなければ ^C（中断） |
-| Ctrl+V | クリップボードに文字があれば貼り付け。画像だけ（スクショなど）のときは、Claude Code には Alt+V（画像の貼り付け）を送り、それ以外のアプリには Ctrl+V をそのまま送る |
+| Ctrl+V | クリップボードに文字があれば貼り付け。画像だけ（スクショなど）のときは、Claude Code には Alt+V（画像の貼り付け）を送り、それ以外のアプリには Ctrl+V をそのまま送る。画像のときはクリップボードの画像を `TerminalView::pasted` に覚え（最大 6 枚・同じ画像の連続は 1 枚）、ターミナルの右上にサムネイルで出す（`render_pasted`。クリックで `render_preview` の拡大表示、Esc / クリックで閉じる）。修飾キーなしの Enter でプロンプトを送ったら消す |
 | Ctrl+Shift+C / Ctrl+Shift+V | コピー / 貼り付け |
 | 右クリック | 選択があればコピー、なければ貼り付け |
 | （アプリがマウスを使うとき） | Claude Code の全画面表示・vim などがマウスを求めているときは、クリック・ドラッグ・右クリックをアプリに送る（ボタンが押せる）。Shift を押しながらなら wimux の文字選択・コピー |

@@ -9,6 +9,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -106,6 +107,12 @@ struct CellMetrics {
     height: Pixels,
 }
 
+/// 覚えておく貼り付けた画像の数（古いものから捨てる）
+const MAX_PASTED: usize = 6;
+/// サムネイルの大きさ
+const THUMB_W: f32 = 72.;
+const THUMB_H: f32 = 54.;
+
 pub struct TerminalView {
     terminal: Terminal,
     focus_handle: FocusHandle,
@@ -137,6 +144,10 @@ pub struct TerminalView {
     mouse_cell: Option<(usize, usize)>,
     last_output: Option<Instant>,
     last_input: Option<Instant>,
+    /// 貼り付けた画像（Claude Code・Codex などへ送ったもの）。右上にサムネイルで出す。Enter で送ったら消す
+    pasted: Vec<Arc<Image>>,
+    /// 大きく表示している貼り付けた画像
+    preview: Option<usize>,
     _io_task: Task<()>,
     _focus_sub: Subscription,
 }
@@ -201,6 +212,8 @@ impl TerminalView {
             mouse_cell: None,
             last_output: None,
             last_input: None,
+            pasted: Vec::new(),
+            preview: None,
             _io_task: io_task,
             _focus_sub: focus_sub,
         }
@@ -381,6 +394,19 @@ impl TerminalView {
         }
         let ks = &ev.keystroke;
         let m = ks.modifiers;
+        // 貼り付けた画像を大きく表示しているときの Esc は閉じるだけ
+        if self.preview.is_some() && ks.key == "escape" {
+            self.preview = None;
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        // Enter（修飾キーなし）でプロンプトを送ったら、貼り付けた画像の表示は消す（もう送ったので）
+        if ks.key == "enter" && !m.control && !m.shift && !m.alt && !self.pasted.is_empty() {
+            self.pasted.clear();
+            self.preview = None;
+            cx.notify();
+        }
         // Ctrl+C: 文字を選択しているときはコピー、していなければ通常どおり ^C（中断）を送る
         if m.control && !m.shift && !m.alt && ks.key == "c" && self.copy_selection(cx) {
             cx.stop_propagation();
@@ -398,6 +424,8 @@ impl TerminalView {
                 cx.stop_propagation();
                 return;
             }
+            // 画像なら、貼り付けたものとして右上にサムネイルで出す（キーはこのあとアプリへ送る）
+            self.remember_pasted_images(cx);
             // 文字がない（スクショなど画像だけ）とき、Claude Code には画像貼り付けのキー
             // Alt+V を送る（Windows の Claude Code は Alt+V で画像を読み込む）
             if self.claude_ui
@@ -891,6 +919,149 @@ impl TerminalView {
                 });
             }));
         }
+    }
+
+    /// クリップボードの画像を「貼り付けた画像」として覚える（新しいものを後ろに。多すぎたら古いものから捨てる）
+    fn remember_pasted_images(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        for entry in item.entries() {
+            if let ClipboardEntry::Image(image) = entry {
+                // 同じ画像を続けて貼り付けたときは 1 つだけ
+                if self.pasted.last().is_some_and(|p| p.bytes == image.bytes) {
+                    continue;
+                }
+                self.pasted.push(Arc::new(image.clone()));
+            }
+        }
+        if self.pasted.len() > MAX_PASTED {
+            let extra = self.pasted.len() - MAX_PASTED;
+            self.pasted.drain(..extra);
+        }
+        self.preview = None;
+        cx.notify();
+    }
+
+    /// 右上の、貼り付けた画像のサムネイル
+    fn render_pasted(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.pasted.is_empty() {
+            return None;
+        }
+        let c = crate::theme::th();
+        let thumbs = self.pasted.iter().enumerate().map(|(i, image)| {
+            div()
+                .id(("pasted", i))
+                .group("pasted-thumb")
+                .relative()
+                .w(px(THUMB_W))
+                .h(px(THUMB_H))
+                .flex_none()
+                .rounded(px(5.))
+                .overflow_hidden()
+                .border_1()
+                .border_color(rgb(c.panel_border))
+                .bg(rgb(c.chrome_bg))
+                .cursor_pointer()
+                .hover(|s| s.border_color(rgb(c.accent)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.preview = Some(i);
+                    cx.notify();
+                }))
+                .child(img(image.clone()).size_full().object_fit(ObjectFit::Cover))
+                // 1 つだけ消す（ホバーで出る）
+                .child(
+                    div()
+                        .id(("pasted-remove", i))
+                        .absolute()
+                        .top(px(2.))
+                        .right(px(2.))
+                        .size(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(hsla(0., 0., 0., 0.65))
+                        .text_color(rgb(0xffffff))
+                        .text_size(px(10.))
+                        .invisible()
+                        .group_hover("pasted-thumb", |s| s.visible())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if i < this.pasted.len() {
+                                this.pasted.remove(i);
+                            }
+                            this.preview = None;
+                            cx.notify();
+                        }))
+                        .child("✕"),
+                )
+        });
+        Some(
+            div()
+                .id("pasted-images")
+                .absolute()
+                .top(px(8.))
+                .right(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .p(px(6.))
+                .rounded(px(8.))
+                .bg(crate::theme::bg(c.chrome_bg))
+                .border_1()
+                .border_color(rgb(c.panel_border))
+                // ターミナルの文字選択を始めない
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .children(thumbs)
+                .child(
+                    div()
+                        .id("pasted-clear")
+                        .size(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .text_size(px(11.))
+                        .text_color(rgb(c.text_faint))
+                        .hover(|s| s.bg(rgb(c.hover_bg)).text_color(rgb(c.text)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.pasted.clear();
+                            this.preview = None;
+                            cx.notify();
+                        }))
+                        .child("✕"),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 貼り付けた画像を大きく表示（クリック・Esc で閉じる）
+    fn render_preview(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let image = self.pasted.get(self.preview?)?.clone();
+        Some(
+            div()
+                .id("pasted-preview")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .p(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(0., 0., 0., 0.7))
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.preview = None;
+                    cx.notify();
+                }))
+                .child(img(image).size_full().object_fit(ObjectFit::Contain))
+                .into_any_element(),
+        )
     }
 
     fn render_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1470,6 +1641,8 @@ impl Render for TerminalView {
 
         let exited = self.exited;
         let search_bar = self.render_search_bar(cx);
+        let pasted = self.render_pasted(cx);
+        let preview = self.render_preview(cx);
         let hovering_link = self.hover_link.is_some();
         div()
             .id("terminal")
@@ -1494,6 +1667,8 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::open_search))
             .when(hovering_link, |el| el.cursor_pointer())
             .child(terminal_canvas)
+            .children(pasted)
+            .children(preview)
             .children(search_bar)
             .when(exited, |el| {
                 el.child(
