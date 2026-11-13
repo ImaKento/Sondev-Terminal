@@ -949,6 +949,7 @@ impl TerminalView {
             return None;
         }
         let c = crate::theme::th();
+        let (top, left) = self.pasted_position();
         let thumbs = self.pasted.iter().enumerate().map(|(i, image)| {
             div()
                 .id(("pasted", i))
@@ -1001,8 +1002,8 @@ impl TerminalView {
             div()
                 .id("pasted-images")
                 .absolute()
-                .top(px(8.))
-                .right(px(12.))
+                .top(top)
+                .left(left)
                 .flex()
                 .items_center()
                 .gap(px(6.))
@@ -1036,6 +1037,29 @@ impl TerminalView {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// サムネイルの置き場所（このビューの左上から）。入力欄（カーソルの行）のすぐ上に、左に揃えて置く。
+    /// Claude Code などは入力欄の上に枠の線があるので、カーソルの 1 行上のさらに上に置く。
+    /// 上に入らなければカーソルの下に置く
+    fn pasted_position(&self) -> (Pixels, Pixels) {
+        // ビューの余白（render の pl / pt と同じ）
+        let (pad_left, pad_top) = (px(10.), px(6.));
+        let strip_h = px(THUMB_H + 2. * 6. + 2.);
+        let gap = px(4.);
+        let (Some(content), Some(cursor)) = (self.content_bounds.get(), self.ime_anchor.get())
+        else {
+            return (pad_top + gap, pad_left);
+        };
+        let row_h = cursor.size.height;
+        let cursor_top = cursor.origin.y - content.origin.y + pad_top;
+        let above = cursor_top - row_h - gap - strip_h;
+        let top = if above >= px(4.) {
+            above
+        } else {
+            cursor_top + row_h * 2. + gap
+        };
+        (top, pad_left)
     }
 
     /// 貼り付けた画像を大きく表示（クリック・Esc で閉じる）
