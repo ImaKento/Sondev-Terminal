@@ -325,6 +325,8 @@ struct Pane {
     url_field: Option<Entity<TextField>>,
     _field_sub: Option<Subscription>,
     loading: bool,
+    /// 読み込みが終わったらキー入力をページに向ける（何も指定しないで開いた Google のタブ）
+    focus_page: bool,
     /// ファイルの表示のタブなら、そのファイル
     file: Option<PathBuf>,
     file_view: Option<Entity<crate::viewer::FileView>>,
@@ -385,6 +387,7 @@ impl Pane {
             url_field: None,
             _field_sub: None,
             loading: false,
+            focus_page: false,
             file: None,
             file_view: None,
         }
@@ -1153,7 +1156,7 @@ impl WimuxWindow {
         cx.notify();
     }
 
-    /// Ctrl+Shift+L: 右に分割して、新しい区画を空のブラウザにする（URL 欄にカーソル）。
+    /// Ctrl+Shift+L: 右に分割して、新しい区画をブラウザにする（Google の検索欄）。
     /// ブラウザのタブを見ているときは、分割せずにその URL 欄へ（ブラウザの Ctrl+L と同じ使い方）
     fn split_browser(&mut self, _: &SplitBrowser, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.focused_pane()
@@ -1166,7 +1169,9 @@ impl WimuxWindow {
             return;
         };
         let pane = self.alloc_id();
-        self.panes.insert(pane, Pane::new_browser(String::new()));
+        let mut p = Pane::new_browser(browser::HOME_URL.into());
+        p.focus_page = true;
+        self.panes.insert(pane, p);
         let gid = self.alloc_id();
         self.groups.insert(gid, Group::new(pane));
         if let Some(ws) = self.workspaces.get_mut(self.active)
@@ -1175,7 +1180,6 @@ impl WimuxWindow {
             ws.focused = gid;
         }
         self.focus_handle.focus(window, cx);
-        self.focus_url_field(pane, window, cx);
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1535,14 +1539,14 @@ impl WimuxWindow {
     // ブラウザ
     // -----------------------------------------------------------------------
 
-    /// Ctrl+Shift+O: フォーカス中の区画に空のブラウザのタブを開き、URL 欄にカーソルを置く
+    /// Ctrl+Shift+O: フォーカス中の区画に新しいブラウザのタブを開く（Google の検索欄）
     fn open_browser(&mut self, _: &OpenBrowser, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(gid) = self.focused_group() {
             self.open_browser_in(gid, String::new(), window, cx);
         }
     }
 
-    /// 区画に新しいブラウザのタブを作る。URL が空なら URL 欄にカーソルを置く
+    /// 区画に新しいブラウザのタブを作る。URL が空なら Google の検索欄を出し、読み込んだらページにキー入力を向ける
     fn open_browser_in(
         &mut self,
         gid: GroupId,
@@ -1552,7 +1556,9 @@ impl WimuxWindow {
     ) {
         let id = self.alloc_id();
         let blank = url.is_empty();
-        self.panes.insert(id, Pane::new_browser(url));
+        let mut pane = Pane::new_browser(if blank { browser::HOME_URL.into() } else { url });
+        pane.focus_page = blank;
+        self.panes.insert(id, pane);
         if let Some(group) = self.groups.get_mut(&gid) {
             let at = (group.active + 1).min(group.tabs.len());
             group.tabs.insert(at, id);
@@ -1562,9 +1568,6 @@ impl WimuxWindow {
             ws.focused = gid;
         }
         self.focus_handle.focus(window, cx);
-        if blank {
-            self.focus_url_field(id, window, cx);
-        }
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1697,7 +1700,15 @@ impl WimuxWindow {
         };
         match msg {
             BrowserMsg::Title(t) => pane.title = Some(t),
-            BrowserMsg::Loading(l) => pane.loading = l,
+            BrowserMsg::Loading(l) => {
+                pane.loading = l;
+                if !l && pane.focus_page {
+                    pane.focus_page = false;
+                    if let Some(b) = &pane.browser {
+                        b.focus();
+                    }
+                }
+            }
             // 新しいタブを開く・キーを回すのは上（受信側）で処理する
             BrowserMsg::NewWindow(_) | BrowserMsg::Key(_) => {}
             // ブラウザをクリックした: その区画・タブをアクティブにする（タブの青い線を移す）

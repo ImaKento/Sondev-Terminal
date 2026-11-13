@@ -58,6 +58,9 @@ pub enum BrowserMsg {
 
 pub type BrowserSender = flume::Sender<(PaneId, BrowserMsg)>;
 
+/// 何も指定しないで開いたブラウザのタブに出すページ（Google の検索欄）
+pub const HOME_URL: &str = "https://www.google.com/";
+
 pub struct Browser {
     // フィールドは上から順に破棄される。WebView を先に、入れ物のウィンドウを後に
     webview: WebView,
@@ -118,6 +121,11 @@ impl Browser {
             placed: Cell::new(None),
             visible: Cell::new(false),
         })
+    }
+
+    /// キー入力をページに向ける（開いたページの検索欄にすぐ打てるように）
+    pub fn focus(&self) {
+        let _ = self.webview.focus();
     }
 
     /// 区画の位置（メインウィンドウ内の論理座標）を覚えて、そこに重ねる
