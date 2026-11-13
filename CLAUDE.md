@@ -111,7 +111,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | Ctrl+矢印 / Alt+矢印 | 区画間の移動 |
 | Alt+Shift+矢印 | 分割の境界をその方向へ動かす（5% ずつ）。境界の線をマウスでドラッグしても変えられる |
 | Ctrl+W / Ctrl+Shift+W | タブを閉じる（最後のタブなら区画も閉じる） |
-| Ctrl+Shift+L | 右に分割して、新しい区画を空のブラウザにする（URL 欄に入力して Enter）。ブラウザのタブを見ているときは、その URL 欄へ |
+| Ctrl+Shift+L | 右に分割して、新しい区画をブラウザにする（Google の検索欄 = `browser::HOME_URL`。読み込みが終わったら `Browser::focus` でキー入力をページに向ける）。ブラウザのタブを見ているときは、その URL 欄へ |
 | Ctrl+Shift+G / `cdi [キーワード]` | フォルダ履歴からターミナル内で選んで移動（fzf を使う。PATH になければインストーラー同梱の fzf.exe、それもなければ内蔵の選択画面） |
 | Ctrl+Shift+A / `clist [キーワード]` | conda の環境をターミナル内で選んで `conda activate`（cdi と同じ選択画面。一覧は conda を起動せず `<root>\envs\*` と `~\.conda\environments.txt` から作る） |
 | `dlist [キーワード]` | Docker のコンテナを選んで `docker exec -it <名前>`（bash、無ければ sh）。止まっていれば `docker start`。入るときに `WIMUX_DOCKER` を送り、ペインごとに session.json の `docker` に保存して次回 `dlist --enter <名前>` で入り直す（`docker exec -it` / `docker attach` を直接打っても同じ。名前は `valid_container` で検査）。プロンプトが出たら抜けたとみなす |
@@ -126,8 +126,8 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | Ctrl+Shift+B | サイドバーの表示 / 非表示 |
 | Ctrl+Shift+X | 右側のファイル一覧の表示 / 非表示（settings.json の `file_tree` に保存）。ルートはフォーカス中のペインの cwd（ブラウザのタブのときは前のまま）。フォルダの読み込みはバックグラウンドで、表示中は 3 秒ごとに読み直す。1 フォルダ 2000 件まで。ファイルのクリックは区画にファイルの表示のタブを開く（`open_file_in`。同じファイルのタブがあればそれを選んで読み直す）。Ctrl+クリックは `open::open_path`（エディタ）。一覧はファイルだけ（見出し・フォルダ名は出さない）。git のリポジトリの中なら `git --no-optional-locks status --porcelain=v1 -z --ignored=matching` をバックグラウンドで実行し（一覧の読み直しと同じ 3 秒ごと・フォルダが変わったとき）、変更=黄・新規=緑・衝突=赤・無視=薄くする（`file_tree::parse_git_status`。変更は親フォルダにも広げる。無視は広げない）。独自タイトルバーのときは、一覧の上に最小化・最大化・閉じるボタンとドラッグ領域だけの行を置く |
 | Ctrl+, | 設定画面（サイドバー右下の「⚙ 設定」でも可） |
-| Ctrl+Shift+O | フォーカス中の区画に空のブラウザのタブを開く（URL 欄に入力して Enter） |
-| `web [URL / ポート / 検索語]` | シェルから、同じ区画に新しいブラウザのタブを開く（引数なしなら空のタブ。`web 3000` → localhost:3000） |
+| Ctrl+Shift+O | フォーカス中の区画にブラウザのタブを開く（Google の検索欄。読み込んだらページにキー入力） |
+| `web [URL / ポート / 検索語]` | シェルから、同じ区画に新しいブラウザのタブを開く（引数なしなら Google の検索欄。`web 3000` → localhost:3000） |
 | Ctrl+Shift+F | スクロールバックを検索（Enter / ↑ で上へ、Shift+Enter / ↓ で下へ、Esc で閉じる。大文字を含まなければ大文字・小文字を区別しない） |
 | Ctrl+クリック | URL を既定のブラウザで、ファイルパス（`src/a.rs:12:3` など）をエディタで、フォルダをエクスプローラーで開く。Ctrl を押すと下線が出る |
 | Ctrl+Shift+クリック | URL をアプリ内のブラウザのタブで開く |
