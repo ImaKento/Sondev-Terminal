@@ -109,9 +109,8 @@ struct CellMetrics {
 
 /// 覚えておく貼り付けた画像の数（古いものから捨てる）
 const MAX_PASTED: usize = 6;
-/// サムネイルの大きさ
-const THUMB_W: f32 = 72.;
-const THUMB_H: f32 = 54.;
+/// サムネイルの大きさ（正方形）
+const THUMB: f32 = 80.;
 
 pub struct TerminalView {
     terminal: Terminal,
@@ -943,21 +942,20 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 右上の、貼り付けた画像のサムネイル
+    /// 入力欄のすぐ上の、貼り付けた画像のサムネイル（スマホのメッセージアプリの添付と同じ見た目）
     fn render_pasted(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.pasted.is_empty() {
             return None;
         }
         let c = crate::theme::th();
+        let (top, left) = self.pasted_position();
         let thumbs = self.pasted.iter().enumerate().map(|(i, image)| {
             div()
                 .id(("pasted", i))
-                .group("pasted-thumb")
                 .relative()
-                .w(px(THUMB_W))
-                .h(px(THUMB_H))
+                .size(px(THUMB))
                 .flex_none()
-                .rounded(px(5.))
+                .rounded(px(12.))
                 .overflow_hidden()
                 .border_1()
                 .border_color(rgb(c.panel_border))
@@ -969,23 +967,22 @@ impl TerminalView {
                     cx.notify();
                 }))
                 .child(img(image.clone()).size_full().object_fit(ObjectFit::Cover))
-                // 1 つだけ消す（ホバーで出る）
+                // 1 枚だけ消す
                 .child(
                     div()
                         .id(("pasted-remove", i))
                         .absolute()
-                        .top(px(2.))
-                        .right(px(2.))
-                        .size(px(16.))
+                        .top(px(5.))
+                        .right(px(5.))
+                        .size(px(20.))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded_full()
-                        .bg(hsla(0., 0., 0., 0.65))
+                        .bg(hsla(0., 0., 0., 0.75))
                         .text_color(rgb(0xffffff))
-                        .text_size(px(10.))
-                        .invisible()
-                        .group_hover("pasted-thumb", |s| s.visible())
+                        .text_size(px(11.))
+                        .hover(|s| s.bg(hsla(0., 0., 0., 0.95)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             if i < this.pasted.len() {
@@ -1001,41 +998,40 @@ impl TerminalView {
             div()
                 .id("pasted-images")
                 .absolute()
-                .top(px(8.))
-                .right(px(12.))
+                .top(top)
+                .left(left)
                 .flex()
-                .items_center()
-                .gap(px(6.))
-                .p(px(6.))
-                .rounded(px(8.))
-                .bg(crate::theme::bg(c.chrome_bg))
-                .border_1()
-                .border_color(rgb(c.panel_border))
+                .items_end()
+                .gap(px(8.))
                 // ターミナルの文字選択を始めない
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .children(thumbs)
-                .child(
-                    div()
-                        .id("pasted-clear")
-                        .size(px(18.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.))
-                        .cursor_pointer()
-                        .text_size(px(11.))
-                        .text_color(rgb(c.text_faint))
-                        .hover(|s| s.bg(rgb(c.hover_bg)).text_color(rgb(c.text)))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.pasted.clear();
-                            this.preview = None;
-                            cx.notify();
-                        }))
-                        .child("✕"),
-                )
                 .into_any_element(),
         )
+    }
+
+    /// サムネイルの置き場所（このビューの左上から）。入力欄（カーソルの行）のすぐ上に、左に揃えて置く。
+    /// Claude Code などは入力欄の上に枠の線があるので、カーソルの 1 行上のさらに上に置く。
+    /// 上に入らなければカーソルの下に置く
+    fn pasted_position(&self) -> (Pixels, Pixels) {
+        // ビューの余白（render の pl / pt と同じ）
+        let (pad_left, pad_top) = (px(10.), px(6.));
+        let strip_h = px(THUMB);
+        let gap = px(4.);
+        let (Some(content), Some(cursor)) = (self.content_bounds.get(), self.ime_anchor.get())
+        else {
+            return (pad_top + gap, pad_left);
+        };
+        let row_h = cursor.size.height;
+        let cursor_top = cursor.origin.y - content.origin.y + pad_top;
+        let above = cursor_top - row_h - gap - strip_h;
+        let top = if above >= px(4.) {
+            above
+        } else {
+            cursor_top + row_h * 2. + gap
+        };
+        (top, pad_left)
     }
 
     /// 貼り付けた画像を大きく表示（クリック・Esc で閉じる）
