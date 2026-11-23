@@ -276,6 +276,7 @@ Windows で確認済み: PowerShell・色・全角・cwd/conda 表示（OSC 9;9 
 - `use gpui_kit::*` すると GPUI の `test` マクロが Rust 標準の `#[test]` を隠してしまう。テストモジュールでは `use super::*` を避け、必要なものだけ import する
 - gpui-kit の Root は `tab` / `shift-tab`（フォーカス移動）と `ctrl-c`（コピー）にキーを割り当てている。キー割り当てはターミナルの `on_key_down` より先に処理されるため、`window.rs` で `Terminal` コンテキストに `NoAction` を割り当てて無効にしている。ターミナルで効かないキーがあれば、まずここを疑う
 - ブラウザ（別ウィンドウ）を隠す条件は `sync_browsers` と `render_browser` で必ず揃える。ずれると描画のたびに「隠す → 表示」を繰り返してチカチカする。境界のドラッグ（`resizing`）中は隠さず、タブ・ワークスペースのドラッグ中だけ隠す（`tab_dragging`）
+- 終了するとき（ウィンドウを閉じる・最後のワークスペースを閉じる・アップデート）は、先に `close_browsers` で WebView をすべて捨てる（wry の Drop が WebView2 の `Close()` を呼ぶ）。閉じないままプロセスが終わると、裏のブラウザが Cookie を書き出す前に止まり、GitHub などのログインが次の起動で消えることがある
 - WebView2 の作成中は Windows のメッセージループが回る。GPUI の処理の途中（render や action の中）で作ると GPUI が二重に呼ばれて壊れるので、`sync_browsers` では生のウィンドウハンドルだけを持って非同期タスクの中で作っている
 - GPUI（Windows）は DirectComposition の描画を子ウィンドウより **上** に重ねる（`CreateTargetForHwnd(hwnd, true)`）ため、WebView2 を子ウィンドウにすると隠れて見えない。そこで `browser.rs` の `host::HostWindow`（メインウィンドウに所有された枠なしウィンドウ）に WebView2 を入れ、区画の位置（画面座標）に重ねている。メインウィンドウを動かしたときは window.rs の 30ms タイマーで `reposition` して追従させる
 - Windows 専用コードは Linux でも型チェックできる: `RUSTFLAGS="--cfg wimux_check" cargo check`。`rustup target add x86_64-pc-windows-msvc` すれば `cargo check --target x86_64-pc-windows-msvc` で Windows 向けそのものも型チェックできる（リンクはしない）

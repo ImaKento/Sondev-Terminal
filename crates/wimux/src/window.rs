@@ -523,6 +523,7 @@ impl WimuxWindow {
             let _ = weak.update(cx, |this, _| {
                 this.closing = true;
                 this.save_now();
+                this.close_browsers();
             });
             true
         });
@@ -1000,6 +1001,7 @@ impl WimuxWindow {
         if self.workspaces.is_empty() {
             self.closing = true;
             self.save_now();
+            self.close_browsers();
             crate::window_state::save(&crate::window_state::SavedWindow::from_bounds(
                 window.window_bounds(),
             ));
@@ -2825,6 +2827,18 @@ impl WimuxWindow {
         }));
     }
 
+    /// 終了する前に、ブラウザ（WebView2）をすべて閉じる。
+    /// 閉じないままアプリが終わると、WebView2 の裏のブラウザが Cookie をディスクに書く前に止まり、
+    /// GitHub などのログインが次の起動で消えていることがある（WebView を閉じると、裏のブラウザは
+    /// Cookie などを書き出してから自分で終わる）
+    fn close_browsers(&mut self) {
+        for pane in self.panes.values_mut() {
+            // WebView を捨てると WebView2 のコントローラーが閉じられる
+            pane.browser = None;
+        }
+        self.web_context = None;
+    }
+
     fn save_now(&self) {
         if let Err(e) = session::save_session(&session::session_path(), &self.to_session()) {
             log::warn!("セッションを保存できませんでした: {e}");
@@ -3467,6 +3481,7 @@ impl WimuxWindow {
                     // インストーラーが上書きできるよう、保存してから終了する
                     this.closing = true;
                     this.save_now();
+                    this.close_browsers();
                     crate::window_state::save(&crate::window_state::SavedWindow::from_bounds(
                         window.window_bounds(),
                     ));
