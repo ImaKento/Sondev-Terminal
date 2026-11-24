@@ -19,6 +19,10 @@ pub const DEFAULT_LINE_HEIGHT: f32 = 1.25;
 pub const UI_TEXT: f32 = 13.0;
 pub const UI_TAB: f32 = 12.5;
 pub const UI_SMALL: f32 = 11.5;
+// サイドバー（ワークスペースの一覧）の文字サイズ。名前は控えめに、補足はさらに小さく
+pub const SIDEBAR_NAME: f32 = 12.5;
+pub const SIDEBAR_META: f32 = 11.0;
+pub const SIDEBAR_HEADER: f32 = 10.5;
 
 // 寸法
 pub const SIDEBAR_WIDTH: f32 = 210.0;

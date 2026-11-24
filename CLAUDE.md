@@ -125,7 +125,7 @@ Windows ランナーでインストーラーを作り、GitHub Releases に置�
 | Ctrl+= / Ctrl+- / Ctrl+0 | 文字を大きく / 小さく / 元に戻す |
 | Ctrl+Shift+B | サイドバーの表示 / 非表示 |
 | Ctrl+Shift+X | 右側のファイル一覧の表示 / 非表示（settings.json の `file_tree` に保存）。ルートはフォーカス中のペインの cwd（ブラウザのタブのときは前のまま）。フォルダの読み込みはバックグラウンドで、表示中は 3 秒ごとに読み直す。1 フォルダ 2000 件まで。ファイルのクリックは区画にファイルの表示のタブを開く（`open_file_in`。同じファイルのタブがあればそれを選んで読み直す）。Ctrl+クリックは `open::open_path`（エディタ）。一覧はファイルだけ（見出し・フォルダ名は出さない）。git のリポジトリの中なら `git --no-optional-locks status --porcelain=v1 -z --ignored=matching` をバックグラウンドで実行し（一覧の読み直しと同じ 3 秒ごと・フォルダが変わったとき）、変更=黄・新規=緑・衝突=赤・無視=薄くする（`file_tree::parse_git_status`。変更は親フォルダにも広げる。無視は広げない）。独自タイトルバーのときは、一覧の上に最小化・最大化・閉じるボタンとドラッグ領域だけの行を置く |
-| Ctrl+, | 設定画面（サイドバー右下の「⚙ 設定」でも可） |
+| Ctrl+, | 設定画面（サイドバー左下の「⚙ 設定」でも可） |
 | Ctrl+Shift+O | フォーカス中の区画にブラウザのタブを開く（Google の検索欄。読み込んだらページにキー入力） |
 | `web [URL / ポート / 検索語]` | シェルから、同じ区画に新しいブラウザのタブを開く（引数なしなら Google の検索欄。`web 3000` → localhost:3000） |
 | Ctrl+Shift+F | スクロールバックを検索（Enter / ↑ で上へ、Shift+Enter / ↓ で下へ、Esc で閉じる。大文字を含まなければ大文字・小文字を区別しない） |
@@ -198,7 +198,7 @@ $env:RUST_LOG="info"; cargo run   # ログを詳しく
 - ファイルの表示（`viewer.rs`）: ブラウザと同じく区画のタブの 1 種類（`Pane::file` / `file_view`。session.json の `file` に保存して復元）。読み込みと色付けはバックグラウンド。色付けは syntect（`default-syntaxes` + `regex-fancy`。Rust だけで動く）の parsing だけを使い、スコープ（comment・string・keyword…）を `viewer::selectors` でテーマの 16 色に割り当てる（syntect のテーマは使わない）。同梱の定義に無い言語は近い定義で代用（TypeScript → JavaScript、TOML / ini → Java Properties、Vue → HTML、SCSS → CSS など。`syntax_for`）。8 MB を超えるファイルは途中まで、2 MB を超えるか 1 行 5000 文字を超えるところから先は色を付けない。NUL を含むファイルは表示しない。Ctrl+C / Ctrl+A は `FileView` コンテキストで NoAction にして `on_key_down` で処理。横スクロールは `uniform_list` の `Unconstrained`（いちばん長い行の幅）
 - URL 欄（text_field.rs）: カーソル移動・選択・コピー/切り取り/貼り付け・マウス選択に対応。GPUI の examples/input.rs と同じく自前で描画
 - ウィンドウ: 閉じたときの位置・大きさ・最大化を `window.json` に保存し、次の起動で復元（初回や、前回の位置がどの画面にも入らないときは最大化）
-- サイドバー: ワークスペースごとに「状態の丸・名前・未読数」「ブランチ · フォルダ」「conda · Claude の状態」「最新の通知」
+- サイドバー: ワークスペースごとに「状態の丸・名前・未読数」「ブランチ · フォルダ」「conda · Claude の状態」「最新の通知」。文字はサイドバー用の小さめのサイズ（`theme::SIDEBAR_NAME` 12.5 / `SIDEBAR_META` 11 / `SIDEBAR_HEADER` 10.5）。選んでいるワークスペースは控えめな灰色の背景＋左端の細いアクセントの線（青の塗りつぶしにはしない）、ほかは文字を一段薄く。いちばん下は「⚙ 設定」とコマンドパレットのキー（Ctrl+Shift+P。クリックでも開く）
 - 状態の丸: 黄=Claude 作業中、青=未確認の通知あり、緑=Claude 入力待ち
 - 見ていない間に通知があったペインは青い枠（cmux の pane ring）。フォーカスすると消える
 - Windows では OS のタイトルバーを消し、区画のタブ行を一番上に置く。上端の区画のタブ行の空きはウィンドウのドラッグ（`WindowControlArea::Drag`）、右上の区画のタブ行の右端に最小化・最大化・閉じるボタン（`custom_titlebar()` / `Edge`）。Linux で確認するときは `WIMUX_CUSTOM_TITLEBAR=1`
