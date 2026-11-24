@@ -3135,7 +3135,7 @@ impl WimuxWindow {
     fn status_dot(color: Option<u32>) -> Div {
         div()
             .flex_none()
-            .size(px(7.))
+            .size(px(6.))
             .rounded_full()
             .when_some(color, |el, c| el.bg(rgb(c)))
     }
@@ -3155,10 +3155,11 @@ impl WimuxWindow {
             let dot = self.workspace_dot(ws, selected);
             // 未読の数字も状態の色で（入力待ち=赤、完了=緑 …）
             let badge = dot.filter(|_| unread > 0).unwrap_or(th().accent);
+            // 選んでいるものは文字を明るく、ほかは一段落とす（背景は控えめな灰色＋左端の細い線）
             let (fg, meta) = if selected {
-                (0xffffff, th().selected_meta)
-            } else {
                 (th().text, th().text_dim)
+            } else {
+                (th().text_dim, th().text_faint)
             };
 
             // 2 行目: ブランチ · フォルダ
@@ -3172,26 +3173,14 @@ impl WimuxWindow {
             // 3 行目: conda · Claude の状態
             let mut line3: Vec<(String, u32)> = Vec::new();
             if let Some(env) = conda {
-                line3.push((
-                    format!("🐍 {env}"),
-                    if selected { meta } else { th().green_dim },
-                ));
+                line3.push((format!("🐍 {env}"), th().green_dim));
             }
             if let Some(name) = docker {
-                line3.push((
-                    format!("🐳 {name}"),
-                    if selected { meta } else { th().accent },
-                ));
+                line3.push((format!("🐳 {name}"), th().accent));
             }
             match claude {
-                AgentState::Asking => line3.push((
-                    format!("{agent} 入力待ち"),
-                    if selected { 0xffffff } else { th().red },
-                )),
-                AgentState::Working => line3.push((
-                    format!("{agent} 実行中"),
-                    if selected { 0xffffff } else { th().amber },
-                )),
+                AgentState::Asking => line3.push((format!("{agent} 入力待ち"), th().red)),
+                AgentState::Working => line3.push((format!("{agent} 実行中"), th().amber)),
                 AgentState::Idle => line3.push((format!("{agent} 待機中"), meta)),
                 AgentState::None => {}
             }
@@ -3203,15 +3192,28 @@ impl WimuxWindow {
             div()
                 .id(("ws", i))
                 .group("ws-item")
+                .relative()
                 .flex()
                 .flex_col()
-                .gap(px(3.))
+                .gap(px(2.))
                 .px(px(10.))
                 // 上下の 2px は並べ替えの印（透明な枠）の分
-                .py(px(6.))
-                .rounded(px(8.))
+                .py(px(5.))
+                .rounded(px(6.))
                 .cursor_pointer()
-                .when(selected, |el| el.bg(rgb(th().selected_bg)))
+                .when(selected, |el| {
+                    el.bg(rgb(th().hover_bg_strong)).child(
+                        // 選んでいる印: 左端の細いアクセントの線
+                        div()
+                            .absolute()
+                            .left(px(0.))
+                            .top(px(8.))
+                            .bottom(px(8.))
+                            .w(px(2.))
+                            .rounded_full()
+                            .bg(rgb(th().accent)),
+                    )
+                })
                 .when(!selected, |el| el.hover(|s| s.bg(rgb(th().hover_bg))))
                 // タブをワークスペースに落とすと、そのワークスペースへ移動
                 .drag_over::<DraggedTab>(|s, _, _, _| s.bg(rgb(th().hover_bg_strong)))
@@ -3272,8 +3274,8 @@ impl WimuxWindow {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(UI_TEXT))
-                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(SIDEBAR_NAME))
+                                .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
                                 .text_color(rgb(fg))
                                 .child(name),
                         )
@@ -3281,14 +3283,14 @@ impl WimuxWindow {
                             el.child(
                                 div()
                                     .flex_none()
-                                    .min_w(px(18.))
-                                    .h(px(16.))
-                                    .px(px(5.))
+                                    .min_w(px(16.))
+                                    .h(px(14.))
+                                    .px(px(4.))
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .rounded_full()
-                                    .text_size(px(10.5))
+                                    .text_size(px(9.5))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .bg(rgb(badge))
                                     .text_color(rgb(th().chrome_bg))
@@ -3318,9 +3320,9 @@ impl WimuxWindow {
                         div()
                             .pl(px(14.))
                             .truncate()
-                            .text_size(px(UI_SMALL))
+                            .text_size(px(SIDEBAR_META))
                             .text_color(rgb(meta))
-                            .child(line2.join("  ·  ")),
+                            .child(line2.join(" · ")),
                     )
                 })
                 .when(!line3.is_empty(), |el| {
@@ -3329,7 +3331,7 @@ impl WimuxWindow {
                             .pl(px(14.))
                             .flex()
                             .gap(px(8.))
-                            .text_size(px(UI_SMALL))
+                            .text_size(px(SIDEBAR_META))
                             .children(
                                 line3
                                     .into_iter()
@@ -3342,8 +3344,8 @@ impl WimuxWindow {
                         div()
                             .pl(px(14.))
                             .truncate()
-                            .text_size(px(UI_SMALL))
-                            .text_color(rgb(if selected { meta } else { th().text_faint }))
+                            .text_size(px(SIDEBAR_META))
+                            .text_color(rgb(th().text_faint))
                             .child(n),
                     )
                 })
@@ -3369,24 +3371,24 @@ impl WimuxWindow {
                             .h_full()
                             .flex()
                             .items_center()
-                            .pl(px(16.))
+                            .pl(px(18.))
                             .window_control_area(WindowControlArea::Drag)
-                            .text_size(px(UI_SMALL))
+                            .text_size(px(SIDEBAR_HEADER))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(th().text_faint))
-                            .child("WORKSPACES"),
+                            .child("Workspaces"),
                     )
                     .child(
                         div()
                             .id("ws-add")
                             .mr(px(10.))
-                            .size(px(24.))
+                            .size(px(22.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(6.))
                             .cursor_pointer()
-                            .text_size(px(15.))
+                            .text_size(px(14.))
                             .text_color(rgb(th().text_dim))
                             .hover(|s| s.bg(rgb(th().hover_bg)).text_color(rgb(th().text)))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -3418,39 +3420,52 @@ impl WimuxWindow {
             )
             .children(self.render_update_notice(cx))
             .children(self.render_usage())
+            // いちばん下: 設定と、コマンドパレットのキー（クリックでも開く）
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
                     .justify_between()
-                    .pl(px(16.))
-                    .pr(px(10.))
+                    .px(px(10.))
                     .py(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(th().text_faint))
-                            .child("Ctrl+Shift+G でフォルダ移動"),
-                    )
+                    .border_t_1()
+                    .border_color(rgb(th().panel_border))
                     .child(
                         div()
                             .id("open-settings")
                             .flex()
                             .items_center()
                             .gap(px(5.))
-                            .px(px(8.))
-                            .py(px(4.))
-                            .rounded(px(6.))
+                            .px(px(6.))
+                            .py(px(3.))
+                            .rounded(px(5.))
                             .cursor_pointer()
-                            .text_size(px(UI_SMALL))
-                            .text_color(rgb(th().text_dim))
+                            .text_size(px(SIDEBAR_META))
+                            .text_color(rgb(th().text_faint))
                             .hover(|s| s.bg(rgb(th().hover_bg)).text_color(rgb(th().text)))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_settings(&OpenSettings, window, cx);
                             }))
                             .child("⚙")
                             .child("設定"),
+                    )
+                    .child(
+                        div()
+                            .id("open-palette")
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(rgb(th().panel_border))
+                            .cursor_pointer()
+                            .text_size(px(10.))
+                            .text_color(rgb(th().text_faint))
+                            .hover(|s| s.text_color(rgb(th().text)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.command_palette(&CommandPalette, window, cx);
+                            }))
+                            .child("Ctrl+Shift+P"),
                     ),
             )
     }
